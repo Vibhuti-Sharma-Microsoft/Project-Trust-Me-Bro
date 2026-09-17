@@ -1,0 +1,33 @@
+name: Implementation task
+description: A bounded task with an owner and acceptance criteria
+title: "[TASK-ID] "
+body:
+  - type: markdown
+    attributes:
+      value: "Do not paste real incident IDs, logs, credentials, or private document content into issues."
+  - type: dropdown
+    id: owner-track
+    attributes:
+      label: Primary track
+      options:
+        - "A - data and evidence"
+        - "B - judges and evaluation"
+        - "Joint contract/release work"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and owned files
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and external blockers

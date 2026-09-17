@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sre-answer-assurance"
+version = "0.1.0"
+description = "Local, auditable evidence scoring for individual SRE incident responses"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "httpx>=0.27,<1",
+    "jinja2>=3.1,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pyright>=1.1.380,<2"]
+
+[project.scripts]
+sre-assurance = "sre_assurance.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sre_assurance"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"

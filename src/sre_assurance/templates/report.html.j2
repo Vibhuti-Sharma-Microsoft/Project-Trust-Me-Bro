@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>SRE Answer Assurance | {{ batch.run_id }}</title>
+  <link rel="stylesheet" href="report.css">
+</head>
+<body>
+{% macro source(value) -%}
+  {% set url = value | source_url %}
+  {% if url %}<a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ value }}</a>
+  {% elif value %}<span class="source-text">{{ value }}</span> <small>(text only; not an allowed HTTP(S) link)</small>
+  {% else %}<span class="muted">Not recorded</span>{% endif %}
+{%- endmacro %}
+{% macro references(items) -%}
+  {% if items %}
+  <ul class="references">
+    {% for ref in items %}<li><strong>Evidence {{ ref.evidence_id }}</strong><blockquote>{{ ref.quote }}</blockquote></li>{% endfor %}
+  </ul>
+  {% else %}<p class="muted">No evidence references recorded.</p>{% endif %}
+{%- endmacro %}
+{% macro notes(items) -%}
+  {% if items %}<ul>{% for item in items %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% else %}<p class="muted">None recorded; this is not a guarantee of completeness.</p>{% endif %}
+{%- endmacro %}
+<a class="skip-link" href="#cases">Skip to cases</a>
+<header class="page-header">
+  <div class="eyebrow">Local audit report</div>
+  <h1>SRE Answer Assurance</h1>
+  <p class="lede">Evidence behind the first diagnostic response, with every failure and missing score retained.</p>
+  <p class="notice"><strong>Uncalibrated evidence index.</strong> This is not a probability of correctness, a safety approval, or verified incident resolution.</p>
+  <dl class="metadata">
+    <div><dt>Run</dt><dd>{{ batch.run_id }}</dd></div>
+    <div><dt>Created</dt><dd>{{ batch.created_at }}</dd></div>
+    <div><dt>Policy version</dt><dd>{{ batch.policy_version }}</dd></div>
+    <div><dt>Schema</dt><dd>{{ batch.schema_version }}</dd></div>
+  </dl>
+</header>
+<main>
+  <section aria-labelledby="batch-heading">
+    <h2 id="batch-heading">Batch summary</h2>
+    <div class="metrics">
+      <div class="metric"><span>Actual real cases</span><strong data-metric="real-count">{{ real_count }}</strong></div>
+      <div class="metric"><span>Actual synthetic cases</span><strong data-metric="synthetic-count">{{ synthetic_count }}</strong></div>
+      <div class="metric"><span>Total cases</span><strong>{{ batch.results | length }}</strong></div>
+      <div class="metric"><span>Mean reported index</span><strong data-metric="mean-score">{{ mean_score | number }}</strong><small>SCORED only; {{ scored_count }} available scores</small></div>
+    </div>
+    <p class="notice" id="input-selection-note">Input cases labeled synthetic are shown separately and do not count toward the real-case target.
+      <strong>Selected real cases: {{ batch.selected_real_cases }} / target real cases: {{ batch.target_real_cases }}.</strong>
+      {% if batch.selected_real_cases < batch.target_real_cases %}The real-case selection is below target.{% endif %}</p>
+    <p>Actual counts above come from the case results, not the target or selection metadata.</p>
+    {% if real_count != batch.selected_real_cases %}<p class="notice">Selection metadata and actual real case count differ.</p>{% endif %}
+    <div class="status-counts" aria-label="All case statuses">
+      {% for status in statuses %}<span class="badge status-{{ status | lower }}">{{ status }} <strong>{{ counts[status] }}</strong></span>{% endfor %}
+    </div>
+    <p class="muted">Null scores are unavailable, never zero. Gate failures, errors and not-applicable cases remain visible and are not included in the mean.</p>
+    <h3>Recorded policy weights</h3>
+    <dl class="vote-list" aria-label="Policy dimension weights">
+      <div><dt>F - Faithfulness</dt><dd data-weight="faithfulness">{{ batch.weights.faithfulness }}%</dd></div>
+      <div><dt>C - Coverage</dt><dd data-weight="coverage">{{ batch.weights.coverage }}%</dd></div>
+      <div><dt>T - Source trust</dt><dd data-weight="source_trust">{{ batch.weights.source_trust }}%</dd></div>
+      <div><dt>P - Freshness</dt><dd data-weight="freshness">{{ batch.weights.freshness }}%</dd></div>
+    </dl>
+    <details>
+      <summary>How to read the four dimensions and contributions</summary>
+      <p><strong>F</strong> = faithfulness; <strong>C</strong> = coverage; <strong>T</strong> = source trust; <strong>P</strong> = freshness.
+        Dimension tri-scores are 0, 0.5 or 1, or unavailable.</p>
+      <p>Step index = F x {{ batch.weights.faithfulness }} + C x {{ batch.weights.coverage }} + T x {{ batch.weights.source_trust }} + P x {{ batch.weights.freshness }}.
+        Weights come from this batch's recorded policy, not from a version or hash. Missing dimension scores remain unavailable.</p>
+      <p>Normalized step contribution = reported step index / number of included steps in that case.
+        Excluded steps have no contribution; missing included scores remain unavailable. The reported case index is shown as supplied, not recomputed.</p>
+      <p>Freshness 1 with no document evidence is a neutral convention, not verified freshness.
+        Where documents exist, their status, timestamps and historical-version verification must be read alongside the score.</p>
+    </details>
+    <details>
+      <summary>Policy provenance</summary>
+      <dl class="metadata"><div class="wide"><dt>Batch policy SHA-256</dt><dd class="hash">{{ batch.policy_sha256 or 'Not recorded' }}</dd></div></dl>
+    </details>
+  </section>
+  <section id="cases" aria-labelledby="cases-heading">
+    <h2 id="cases-heading">Case results</h2>
+    {% if not cases %}<p class="empty">No case results in this batch. No evidence index is available.</p>{% endif %}
+    <nav class="case-nav" aria-label="Case shortcuts">
+      {% for view in cases %}<a href="#case-{{ loop.index }}">{{ view.result.case_id }} <span>{{ view.result.status }}</span></a>{% endfor %}
+    </nav>
+    {% for view in cases %}
+    {% set case = view.result %}
+    {% set case_number = loop.index %}
+    <article class="case" id="case-{{ case_number }}">
+      <header class="case-header">
+        <div><span class="eyebrow">{{ 'Synthetic case' if case.synthetic else 'Real case' }}</span><h3>{{ case.case_id }}</h3></div>
+        <div class="case-outcome"><span class="badge status-{{ case.status | lower }}">{{ case.status }}</span><strong>Reported index: {{ case.score | number }}</strong></div>
+      </header>
+      <dl class="metadata">
+        <div><dt>Incident ID</dt><dd>{{ case.incident_id }}</dd></div>
+        <div><dt>First diagnostic message ID</dt><dd>{{ case.message_id }}</dd></div>
+        <div><dt>Evidence cutoff</dt><dd>{{ case.cutoff }}</dd></div>
+        <div><dt>Included steps</dt><dd>{{ view.included_count }} of {{ case.steps | length }}</dd></div>
+      </dl>
+      {% if case.status != 'SCORED' %}<p class="notice"><strong>{{ case.status }}</strong>: this case is not a scored success. Any recorded values below are retained for audit, not substituted for missing results.</p>{% endif %}
+      {% if case.error %}<p class="error"><strong>Error:</strong> {{ case.error }}</p>{% endif %}
+      <details open>
+        <summary>Response text</summary>
+        {% if case.response_text %}<pre class="response">{{ case.response_text }}</pre>{% else %}<p class="empty">Response text is unavailable.</p>{% endif %}
+      </details>
+      <details>
+        <summary>Initial todo plan</summary>
+        {% if case.todo %}
+        <dl class="metadata">
+          <div><dt>Source call ID</dt><dd>{{ case.todo.source_call_id }}</dd></div>
+          <div><dt>Created</dt><dd>{{ case.todo.created_at }}</dd></div>
+        </dl>
+        <ol class="todo-list">
+          {% for step in case.todo.steps %}
+          <li><strong>{{ step.id }}: {{ step.title }}</strong> <span class="badge">{{ step.kind }}</span>
+            {% if step.condition %}<p>Condition: {{ step.condition }}</p>{% endif %}</li>
+          {% endfor %}
+        </ol>
+        <h4>Original plan text</h4><pre>{{ case.todo.raw }}</pre>
+        {% else %}<p class="empty">No initial todo plan recorded. This does not imply the gate passed.</p>{% endif %}
+      </details>
+      <details {% if case.status == 'GATE_FAILED' %}open{% endif %}>
+        <summary>Todo gate model votes <span class="count">{{ case.gate_votes | length }}</span></summary>
+        {% if view.gate_disagreement %}<p class="notice"><strong>Model disagreement:</strong> recorded gate decisions differ.</p>
+        {% elif case.gate_votes | length > 1 %}<p>Recorded gate decisions agree.</p>{% endif %}
+        {% for role, vote in case.gate_votes.items() %}
+        <section class="inset">
+          <h4>{{ role }} <span class="badge">{{ vote.decision }}</span></h4>
+          <p class="preserve">{{ vote.rationale }}</p>
+          {{ references(vote.references) }}
+        </section>
+        {% else %}<p class="empty">No gate votes recorded. Missing votes are not passes.</p>{% endfor %}
+      </details>
+      <details open>
+        <summary>Step evidence indices <span class="count">{{ case.steps | length }}</span></summary>
+        {% if view.steps %}
+        <div class="table-scroll">
+          <table class="score-table">
+            <caption>F: faithfulness ({{ batch.weights.faithfulness }}%) / C: coverage ({{ batch.weights.coverage }}%) / T: source trust ({{ batch.weights.source_trust }}%) / P: freshness ({{ batch.weights.freshness }}%). Weights from the recorded batch policy.</caption>
+            <thead><tr><th scope="col">Step</th><th scope="col">Disposition</th><th scope="col">Included</th><th scope="col">F</th><th scope="col">C</th><th scope="col">T</th><th scope="col">P</th><th scope="col">Step index</th><th scope="col">Normalized contribution</th></tr></thead>
+            <tbody>
+              {% for step_view in view.steps %}
+              {% set step = step_view.result %}
+              <tr data-step-id="{{ step.id }}">
+                <th scope="row"><a href="#case-{{ case_number }}-step-{{ loop.index }}">{{ step.id }}: {{ step.title }}</a></th>
+                <td>{{ step.disposition }}</td><td>{{ 'Yes' if step.included else 'No - excluded' }}</td>
+                <td data-dimension="F">{{ step.faithfulness if step.faithfulness is not none else 'Unavailable' }}</td>
+                <td data-dimension="C">{{ step.coverage if step.coverage is not none else 'Unavailable' }}</td>
+                <td data-dimension="T">{{ step.source_trust if step.source_trust is not none else 'Unavailable' }}</td>
+                <td data-dimension="P">{{ step.freshness if step.freshness is not none else 'Unavailable' }}
+                  {% if step.freshness == 1 and not step_view.has_documents %}<small>Neutral convention; no docs, not verified freshness</small>{% endif %}</td>
+                <td data-score="step">{{ step.score | number }}</td>
+                <td data-score="contribution">{% if step.included %}{{ step_view.contribution | number }}<small>Step index / {{ view.included_count }} included steps</small>{% else %}Excluded - no contribution{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% for step_view in view.steps %}
+        {% set step = step_view.result %}
+        <details class="inset" id="case-{{ case_number }}-step-{{ loop.index }}">
+          <summary>{{ step.id }}: {{ step.title }} - votes, bindings and limitations</summary>
+          <dl class="metadata">
+            <div><dt>Bound call IDs</dt><dd>{{ step.call_ids | join(', ') or 'None recorded' }}</dd></div>
+            <div><dt>Claim IDs</dt><dd>{{ step.claim_ids | join(', ') or 'None recorded' }}</dd></div>
+            <div class="wide"><dt>Freshness reason</dt><dd>{{ step.freshness_reason or 'Not recorded' }}</dd></div>
+          </dl>
+          {% if step.freshness == 1 and not step_view.has_documents %}<p class="notice">Freshness 1 is a neutral convention for no docs, not verified freshness.</p>{% endif %}
+          <h4>Recorded faithfulness model votes</h4>
+          {% if step_view.disagreement %}<p class="notice"><strong>Model disagreement:</strong> distinct recorded values, preserved below.</p>
+          {% elif step.votes | length > 1 %}<p>Recorded model votes agree.</p>{% endif %}
+          {% if step.votes %}
+          <dl class="vote-list">{% for role, value in step.votes.items() %}<div><dt>{{ role }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>
+          {% else %}<p class="empty">No model votes recorded; no agreement can be inferred.</p>{% endif %}
+          <h4>Claim support</h4>
+          {% for support in step.support %}
+          <div class="inset"><strong>{{ support.claim_id }} - {{ support.verdict }}</strong><p class="preserve">{{ support.rationale }}</p>{{ references(support.references) }}</div>
+          {% else %}<p class="muted">No claim-support records.</p>{% endfor %}
+          <h4>Step limitations / missing source reasons</h4>{{ notes(step.limitations) }}
+        </details>
+        {% endfor %}
+        {% else %}<p class="empty">No step results recorded. No zero scores have been inferred.</p>{% endif %}
+      </details>
+      <details>
+        <summary>Response claims <span class="count">{{ case.claims | length }}</span></summary>
+        {% for claim in case.claims %}
+        <div class="inset"><h4>{{ claim.id }} - {{ claim.claim_type }}</h4><blockquote>{{ claim.quote }}</blockquote>
+          <p>Step: {{ claim.step_id or 'Unbound' }}. Material: {{ 'Yes' if claim.material else 'No' }}.</p></div>
+        {% else %}<p class="empty">No claims recorded.</p>{% endfor %}
+      </details>
+      <details>
+        <summary>Tool calls and source selectors <span class="count">{{ case.calls | length }}</span></summary>
+        {% for call in case.calls %}
+        <details class="inset">
+          <summary>{{ call.id }} - {{ call.name }} <span class="badge">{{ call.status }}</span></summary>
+          <dl class="metadata">
+            <div><dt>Thread ID</dt><dd>{{ call.thread_id }}</dd></div><div><dt>Trace ID</dt><dd>{{ call.trace_id }}</dd></div>
+            <div><dt>Started</dt><dd>{{ call.started_at or 'Not recorded' }}</dd></div><div><dt>Completed</dt><dd>{{ call.completed_at or 'Not recorded' }}</dd></div>
+            <div><dt>Start record IDs</dt><dd>{{ call.start_record_ids | join(', ') or 'None recorded' }}</dd></div>
+            <div><dt>End record IDs</dt><dd>{{ call.end_record_ids | join(', ') or 'None recorded' }}</dd></div>
+          </dl>
+          <h4>Parsed input / source selectors</h4>
+          {% if call.input is not none %}<pre>{{ call.input | json_text }}</pre>{% else %}<p class="muted">Not recorded.</p>{% endif %}
+          <h4>Raw input</h4><pre>{{ call.input_raw or 'Not recorded' }}</pre>
+          <h4>Raw output</h4><pre>{{ call.output_raw or 'Not recorded' }}</pre>
+          <h4>Call quality flags</h4>{{ notes(call.quality_flags) }}
+        </details>
+        {% else %}<p class="empty">No tool calls recorded.</p>{% endfor %}
+      </details>
+      <details>
+        <summary>Evidence sources and record IDs <span class="count">{{ case.evidence | length }}</span></summary>
+        {% for evidence in case.evidence %}
+        <details class="inset">
+          <summary>{{ evidence.id }} - {{ evidence.source_kind }} <span class="badge">{{ 'Eligible' if evidence.eligible else 'Ineligible' }}</span></summary>
+          <dl class="metadata">
+            <div class="wide"><dt>Source / origin</dt><dd>{{ source(evidence.origin) }}</dd></div>
+            <div><dt>Source record ID</dt><dd>{{ evidence.source_record_id or 'Not recorded' }}</dd></div>
+            <div><dt>Call ID</dt><dd>{{ evidence.call_id or 'Not recorded' }}</dd></div>
+            <div><dt>Observed</dt><dd>{{ evidence.observed_at or 'Not recorded' }}</dd></div>
+            <div><dt>Completed</dt><dd>{{ evidence.completed_at or 'Not recorded' }}</dd></div>
+          </dl>
+          <h4>Source selector / query</h4><pre>{{ evidence.query or 'Not recorded' }}</pre>
+          <h4>Evidence text</h4><pre>{{ evidence.content }}</pre>
+          <h4>Evidence quality / missing source flags</h4>{{ notes(evidence.quality_flags) }}
+        </details>
+        {% else %}<p class="empty">No evidence sources recorded.</p>{% endfor %}
+      </details>
+      <details>
+        <summary>Documents, freshness and cache provenance <span class="count">{{ case.documents | length }}</span></summary>
+        {% for document in case.documents %}
+        <details class="inset">
+          <summary>{{ document.id }} <span class="badge">{{ document.status }}</span></summary>
+          <dl class="metadata">
+            <div class="wide"><dt>Source URL</dt><dd>{{ source(document.url) }}</dd></div>
+            <div><dt>Bound step ID</dt><dd>{{ document.step_id }}</dd></div>
+            <div><dt>Last updated</dt><dd>{{ document.last_updated or 'Unknown - not verified' }}</dd></div>
+            <div><dt>Retrieved</dt><dd>{{ document.retrieved_at or 'Not recorded' }}</dd></div>
+            <div><dt>Document version</dt><dd>{{ document.version or 'Not recorded' }}</dd></div>
+            <div><dt>Cache version</dt><dd>Not recorded in batch schema</dd></div>
+            <div><dt>Historical version verified</dt><dd>{{ 'Yes' if document.historical_version_verified else 'No' }}</dd></div>
+            <div class="wide"><dt>Content SHA-256</dt><dd class="hash">{{ document.content_sha256 or 'Not recorded' }}</dd></div>
+            <div class="wide"><dt>Metadata provenance</dt><dd>{{ document.metadata_provenance or 'Not recorded' }}</dd></div>
+            <div class="wide"><dt>Status / missing source reason</dt><dd>{{ document.reason or 'No reason recorded' }}</dd></div>
+          </dl>
+          <h4>Document text</h4><pre>{{ document.content or 'No document text available' }}</pre>
+        </details>
+        {% else %}<p class="empty">No document evidence recorded. Freshness 1, if present, is a neutral convention, not verified freshness.</p>{% endfor %}
+      </details>
+      <details>
+        <summary>Model execution records <span class="count">{{ case.judges | length }}</span></summary>
+        {% for judge in case.judges %}
+        <details class="inset">
+          <summary>{{ judge.role }} - {{ judge.model }} - {{ judge.stage }} <span class="badge">{{ judge.mode }}</span></summary>
+          <dl class="metadata">
+            <div><dt>Step ID</dt><dd>{{ judge.step_id or 'Not step-specific' }}</dd></div>
+            <div><dt>Execution mode</dt><dd>{{ judge.mode }}</dd></div>
+            <div class="wide"><dt>Request SHA-256</dt><dd class="hash">{{ judge.request_sha256 }}</dd></div>
+            <div class="wide"><dt>Prompt SHA-256</dt><dd class="hash">{{ judge.prompt_sha256 }}</dd></div>
+          </dl>
+          <h4>Complete recorded model output</h4><pre>{{ judge.output | json_text }}</pre>
+        </details>
+        {% else %}<p class="empty">No model execution records available.</p>{% endfor %}
+      </details>
+      <details {% if case.limitations %}open{% endif %}>
+        <summary>Case limitations / missing source reasons <span class="count">{{ case.limitations | length }}</span></summary>
+        {{ notes(case.limitations) }}
+      </details>
+      <details>
+        <summary>Case policy and data hashes</summary>
+        <dl class="metadata">
+          <div class="wide"><dt>Case policy SHA-256</dt><dd class="hash">{{ case.policy_sha256 or 'Not recorded' }}</dd></div>
+          <div class="wide"><dt>Case data SHA-256</dt><dd class="hash">{{ case.data_sha256 or 'Not recorded' }}</dd></div>
+        </dl>
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+</main>
+<footer>Local static report. No scripts, remote assets or automatic source fetches. Source links open only when selected.</footer>
+</body>
+</html>

@@ -1,0 +1,55 @@
+// READ ONLY, manual data preparation only. Never executed by the scorer.
+// In the appropriate Application Insights scope, change ExportTable and export one file per table.
+// Expand Scope with the curated threads/windows for the predefined incident list.
+// Scope includes post acknowledgments; the local importer enforces each response's stricter cutoff.
+let ExportTable = "customEvents";
+let Scope = datatable(ThreadId:string, WindowStart:datetime, WindowEnd:datetime)
+[
+    "REPLACE_WITH_VERIFIED_THREAD_ID", datetime(2026-01-01T00:00:00Z), datetime(2026-01-02T00:00:00Z)
+];
+let FirstTime = toscalar(Scope | summarize min(WindowStart));
+let LastTime = toscalar(Scope | summarize max(WindowEnd));
+let Threads = Scope | project ThreadId;
+let Base =
+    union
+        (customEvents | extend ExportSourceTable = "customEvents"),
+        (dependencies | extend ExportSourceTable = "dependencies"),
+        (genAIContent | extend ExportSourceTable = "genAIContent"),
+        (traces | extend ExportSourceTable = "traces"),
+        (requests | extend ExportSourceTable = "requests"),
+        (exceptions | extend ExportSourceTable = "exceptions")
+    | where timestamp >= FirstTime and timestamp < LastTime;
+let Direct =
+    Base
+    | where tostring(customDimensions.ThreadId) in (Threads)
+        or tostring(customDimensions.ChatThreadId) in (Threads)
+        or tostring(customDimensions.thread_id) in (Threads);
+let NativeTraces = Direct | where isnotempty(operation_Id) | distinct operation_Id;
+let CustomTraces = Direct
+    | extend TraceId = tostring(customDimensions.TraceId)
+    | where isnotempty(TraceId) | distinct TraceId;
+let Linked =
+    Base
+    | where operation_Id in (NativeTraces) or tostring(customDimensions.TraceId) in (CustomTraces)
+        or tostring(customDimensions.ThreadId) in (Threads)
+        or tostring(customDimensions.ChatThreadId) in (Threads)
+        or tostring(customDimensions.thread_id) in (Threads);
+let ContentIds = Linked
+    | where ExportSourceTable == "dependencies"
+    | extend ContentId = tostring(customDimensions["_MS.GenAIContentId"])
+    | where isnotempty(ContentId) | distinct ContentId;
+let Selected =
+    Base
+    | where operation_Id in (NativeTraces) or tostring(customDimensions.TraceId) in (CustomTraces)
+        or tostring(customDimensions.ThreadId) in (Threads)
+        or tostring(customDimensions.ChatThreadId) in (Threads)
+        or tostring(customDimensions.thread_id) in (Threads)
+        or (ExportSourceTable == "genAIContent"
+            and tostring(customDimensions["_MS.GenAIContentId"]) in (ContentIds));
+// To obtain count expectations, replace the final expression with:
+// Selected | summarize ExpectedRows=count() by ExportSourceTable
+Selected
+| where ExportSourceTable == ExportTable
+| extend timestamp = format_datetime(timestamp, "yyyy-MM-ddTHH:mm:ss.fffffffZ")
+| project-away ExportSourceTable
+| order by timestamp asc

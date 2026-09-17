@@ -1,0 +1,34 @@
+{
+  "policy_version": "poc-v1",
+  "weights": {"faithfulness": 35, "coverage": 35, "source_trust": 20, "freshness": 10},
+  "fresh_days": 365,
+  "partial_days": 1095,
+  "allowed_document_hosts": [],
+  "trust_rules": [],
+  "models": {
+    "gpt": {
+      "model": "CONFIGURE_APPROVED_GPT_MODEL",
+      "endpoint_env": "SRE_JUDGE_GPT_ENDPOINT",
+      "auth_env": "SRE_JUDGE_GPT_TOKEN",
+      "allowed_host": "configure-approved-enterprise-host",
+      "approved_for_incident_data": false,
+      "protocol": "openai_chat"
+    },
+    "claude": {
+      "model": "CONFIGURE_APPROVED_CLAUDE_MODEL",
+      "endpoint_env": "SRE_JUDGE_CLAUDE_ENDPOINT",
+      "auth_env": "SRE_JUDGE_CLAUDE_TOKEN",
+      "allowed_host": "configure-approved-enterprise-host",
+      "approved_for_incident_data": false,
+      "protocol": "openai_chat"
+    },
+    "gemini": {
+      "model": "CONFIGURE_APPROVED_GEMINI_MODEL",
+      "endpoint_env": "SRE_JUDGE_GEMINI_ENDPOINT",
+      "auth_env": "SRE_JUDGE_GEMINI_TOKEN",
+      "allowed_host": "configure-approved-enterprise-host",
+      "approved_for_incident_data": false,
+      "protocol": "openai_chat"
+    }
+  }
+}

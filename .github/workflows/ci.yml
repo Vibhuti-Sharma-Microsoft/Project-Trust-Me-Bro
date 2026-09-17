@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.lock
+      - name: Install, test, type-check and build
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
+          $python = if ($IsWindows) {
+            Join-Path $PWD ".venv" "Scripts" "python.exe"
+          } else {
+            Join-Path $PWD ".venv" "bin" "python"
+          }
+          & $python -m pip install -c requirements-dev.lock -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { throw "dependency installation failed" }
+          & $python tools/check_publish.py
+          if ($LASTEXITCODE -ne 0) { throw "publish candidate check failed" }
+          & $python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw "tests failed" }
+          & $python -m pyright --pythonpath $python
+          if ($LASTEXITCODE -ne 0) { throw "type checking failed" }
+          & $python -m pip wheel --no-deps --wheel-dir dist .
+          if ($LASTEXITCODE -ne 0) { throw "package build failed" }
