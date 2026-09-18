@@ -107,6 +107,43 @@ def test_selecting_one_incident_updates_title_score_and_tiles(report_page: tuple
     assert page.locator("#selection-status").inner_text() == "Incident incident-987: SCORED, score 50.00."
 
 
+def test_every_incident_selection_shows_its_persisted_response(
+    corpus: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser: Any,
+) -> None:
+    from scoring_service.executor import evaluate_case
+    from scoring_service.models import BatchResult
+    from scoring_service.report import render_report
+    from test_report import _batch
+
+    root, manifest, config = corpus
+    results = [evaluate_case(case, root, config, tmp_path / "cache") for case in manifest.cases]
+    results.append(_case(case_id="import-failure", incident_id="unavailable-incident",
+                         status="IMPORT_ERROR", score=None, steps=[], response_text="",
+                         error="Response snapshot unavailable."))
+    batch = BatchResult.model_validate_json(_batch(*results).model_dump_json())
+    index = render_report(batch, tmp_path / "reports")
+    with _running_server(index.parent, monkeypatch) as address:
+        context = browser.new_context()
+        try:
+            page = context.new_page()
+            page.goto(f"http://{address[0]}:{address[1]}", wait_until="load")
+            for number in [*range(len(batch.results)), *reversed(range(len(batch.results)))]:
+                result = batch.results[number]
+                page.get_by_label("Select incident").select_option(f"case-{number}")
+                host = page.locator("#scorecard-host")
+                assert result.incident_id in host.locator(".response-identity").inner_text()
+                assert result.message_id in host.locator(".response-identity").inner_text()
+                assert host.locator(".scorecard:visible").count() == 1
+                if result.response_text:
+                    assert host.locator(".evaluated-response").text_content() == result.response_text
+                    assert host.locator(".original-response").text_content() == result.response_raw
+                else:
+                    assert host.locator(".evaluated-response, .original-response").count() == 0
+                    assert "Evaluated response unavailable" in host.inner_text()
+        finally:
+            context.close()
+
+
 @pytest.mark.parametrize(
     ("dimension", "name", "calculation", "reason"),
     [

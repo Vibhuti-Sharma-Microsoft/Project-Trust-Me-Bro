@@ -18,6 +18,8 @@ def test_replay_batch_expected_outcomes(corpus, tmp_path):
     assert [(result.status, result.score) for result in results] == expected
     assert set(results[-1].gate_votes) == {"gpt", "claude"}
     assert all(result.synthetic for result in results)
+    for case, result in zip(manifest.cases, results):
+        assert result.response_text == (root / case.response_path).read_text(encoding="utf-8")
 
 
 def test_gate_failure_and_missing_todo_never_fetch_docs_or_judge_steps(corpus, tmp_path):

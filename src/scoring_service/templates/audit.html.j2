@@ -64,6 +64,8 @@
 
 <section class="report-section" aria-label="Exact SRE agent response">
   <h3>Exact SRE agent response evaluated</h3>
+  <p class="response-identity">Incident {{ case.incident_id }} / Message {{ case.message_id }} / Case {{ case.case_id }}</p>
+  {% if case.synthetic %}<p class="notice">Synthetic fixture response, not a real SRE agent incident response.</p>{% endif %}
   <p>The complete evaluated text is preserved below, without summarization or truncation. HTML is displayed as inert text, never executed. Claim quotations refer to this evaluated text.</p>
   {% if audit.response_text %}<pre class="evaluated-response"><code>{{ audit.response_text | verbatim }}</code></pre>{% else %}<p class="notice">Evaluated response unavailable; see import or evaluation errors.</p>{% endif %}
   {% if audit.response_raw is not none %}
