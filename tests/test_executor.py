@@ -79,6 +79,59 @@ def test_replay_is_deterministic(corpus, tmp_path):
     assert first.data_sha256 == second.data_sha256
     assert {record.request_sha256 for record in first.judges} == {record.request_sha256 for record in second.judges}
     assert first.judges == second.judges
+    assert first.evaluation_inputs == second.evaluation_inputs
+
+
+def test_report_provenance_preserves_source_and_all_evaluator_inputs(corpus, tmp_path):
+    root, manifest, config = corpus
+    case = manifest.cases[0]
+    result = evaluate_case(case, root, config, tmp_path / "cache")
+    assert result.case_metadata == case
+    assert result.response_raw == (root / case.response_path).read_bytes().decode("utf-8-sig")
+    assert result.context == (root / case.context_path).read_text(encoding="utf-8")
+    assert result.bindings[0].rationale == "Synthetic one-step binding"
+    assert [(entry.stage, entry.status) for entry in result.evaluation_inputs] == [
+        ("todo_gate", "VALIDATED"), ("claims", "VALIDATED"), ("step", "VALIDATED"),
+    ]
+    gate, claims, step = result.evaluation_inputs
+    assert "response_text" not in gate.payload
+    assert {item["id"] for item in gate.payload["evidence"]} <= {"context", "todo", "requirements"}
+    assert claims.payload["response_text"] == result.response_text
+    assert step.step_id == result.steps[0].id
+    assert step.payload["evidence"]
+    assert step.payload["trust_rules"] == [rule.model_dump(mode="json") for rule in config.trust_rules]
+
+
+def test_failed_step_panel_retains_partial_evaluation_without_scoring(corpus, tmp_path):
+    root, manifest, config = corpus
+    case = manifest.cases[0]
+    path = root / case.replay_path
+    replay = json.loads(path.read_text())
+    del replay["step:step-1:gemini"]
+    write_json(path, replay)
+    result = evaluate_case(case, root, config, tmp_path / "cache")
+    assert result.status == "JUDGE_ERROR" and result.score is None
+    assert len(result.steps) == 1
+    assert result.steps[0].score is None
+    assert result.steps[0].faithfulness is None
+    assert result.steps[0].call_ids
+    failed = result.evaluation_inputs[-1]
+    assert failed.stage == "step" and failed.step_id == "step-1" and failed.status == "FAILED"
+    assert "gemini" in failed.error
+    assert {record.role for record in result.judges if record.stage == "step"} == {"gpt", "claude"}
+
+
+def test_failed_reference_validation_is_not_labeled_validated(corpus, tmp_path):
+    root, manifest, config = corpus
+    case = manifest.cases[7]
+    path = root / case.replay_path
+    replay = json.loads(path.read_text())
+    replay["step:step-1:gpt"]["output"].update(source_trust=1, trust_policy_ids=["demo-kusto"])
+    write_json(path, replay)
+    result = evaluate_case(case, root, config, tmp_path / "cache")
+    assert result.status == "JUDGE_ERROR"
+    assert result.evaluation_inputs[-1].status == "FAILED"
+    assert result.evaluation_inputs[-1].error
 
 
 def test_material_claims_cannot_hide_in_housekeeping(corpus, tmp_path):

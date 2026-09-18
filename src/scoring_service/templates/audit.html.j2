@@ -1,0 +1,220 @@
+{% macro refs(references) -%}
+{% if references %}
+<ul class="references">
+  {% for ref in references %}<li><strong>Evidence {{ ref.evidence_id }}</strong><pre class="quotation">{{ ref.quote }}</pre></li>{% endfor %}
+</ul>
+{% else %}<p class="muted">No evidence references recorded.</p>{% endif %}
+{%- endmacro %}
+{% set audit = case.audit %}
+<section class="report-section" aria-label="Score analysis and formula">
+  <h3>Score analysis and formula</h3>
+  <p>This is an uncalibrated evidence index, not confidence in the diagnosis. The report explains recorded decisions; it does not run another LLM to invent a retrospective explanation.</p>
+  <p class="formula">Step score = {{ run.weights.faithfulness }} x faithfulness + {{ run.weights.coverage }} x coverage + {{ run.weights.source_trust }} x source trust + {{ run.weights.freshness }} x document freshness.</p>
+  <p>Each evaluated dimension is 0, 0.5 or 1. The response score is the sum of included logical-step scores divided by the number of included logical steps. Tool retries do not receive separate weights.</p>
+  <p class="formula" data-aggregation="response">{{ audit.aggregation }}</p>
+  <ul>
+    <li><strong>Gate:</strong> all three valid judge responses are required. Two PASS votes proceed; two FAIL votes override the response score to 0 and skip downstream evaluation. Other combinations are unscorable. Missing or invalid judge responses are errors, not votes.</li>
+    <li><strong>Faithfulness:</strong> median of the three model votes, including evidence relevance, contradictions, query scope and time-window adequacy. A successful tool request or a zero-row query alone does not establish service health.</li>
+    <li><strong>Coverage:</strong> 1 when all assigned material claims are SUPPORTED; 0.5 when at least one is SUPPORTED or PARTIAL but not all are SUPPORTED; otherwise 0. This is a rule, not a fraction of supported claims.</li>
+    <li><strong>Source trust:</strong> the GPT-role judge applies the supplied reviewed trust rules; code validates policy IDs, cited sources and maximum permitted scores. Role labels identify panel slots, not necessarily model families; exact model IDs are shown below.</li>
+    <li><strong>Document freshness:</strong> verified available document content updated at or before the cutoff earns 1 through 365 days, 0.5 through 1,095 days, otherwise 0. Missing, invalid, future or unverified versions earn 0. The minimum across referenced documents applies. No documents earns 1 by a neutral convention, not verified freshness.</li>
+    <li><strong>Denominator:</strong> missing required work and unassigned material claims contribute 0 and remain included. Housekeeping and evidence-backed conditional exclusions are excluded. Unevaluated dimensions are not zero-valued judgments.</li>
+  </ul>
+  {% for finding in audit.analysis %}<p class="analysis-finding">{{ finding }}</p>{% endfor %}
+  {% if audit.trust_rules is not none %}
+  <details><summary>Reviewed source-trust policy used by the evaluator</summary>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Rule ID</th><th>Source kind / origin</th><th>Maximum score</th><th>Instructions</th></tr></thead>
+      <tbody>{% for rule in audit.trust_rules %}<tr><td>{{ rule.id }}</td><td>{{ rule.source_kind }} / {{ rule.origin_prefix }}</td><td>{{ rule.maximum_score | number }}</td><td>{{ rule.instructions }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% if not audit.trust_rules %}<p>No reviewed rules were supplied. No positive source authority may be inferred.</p>{% endif %}
+  </details>
+  {% else %}<p class="muted">No source-trust policy snapshot recorded; source-trust evaluation was skipped or this is an older result.</p>{% endif %}
+  {% if case.consistency_state != 'match' %}<p class="notice">Partial or historical records below do not establish a final score breakdown. {{ case.status_note }}</p>{% endif %}
+  {% if audit.error %}<p class="notice evaluation-error">{{ audit.error }}</p>{% endif %}
+  {% if audit.limitations %}<h4>Limitations and warnings</h4><ul>{% for reason in audit.limitations %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+</section>
+
+<section class="report-section" aria-label="Incident metadata">
+  <h3>Incident metadata and response identity</h3>
+  <dl class="metadata">
+    <dt>Incident ID</dt><dd>{{ case.incident_id }}</dd>
+    <dt>Case ID</dt><dd>{{ case.case_id }}</dd>
+    <dt>Message ID</dt><dd>{{ case.message_id }}</dd>
+    <dt>Response cutoff</dt><dd>{{ audit.cutoff }}</dd>
+    <dt>Data SHA-256</dt><dd>{{ audit.data_sha256 or 'Not recorded' }}</dd>
+    <dt>Policy SHA-256</dt><dd>{{ audit.policy_sha256 or 'Not recorded' }}</dd>
+    {% if audit.case_metadata %}
+    <dt>IcM instance</dt><dd>{{ audit.case_metadata.icm_instance }}</dd>
+    <dt>Thread ID</dt><dd>{{ audit.case_metadata.thread_id }}</dd>
+    <dt>Posting call ID</dt><dd>{{ audit.case_metadata.post_call_id }}</dd>
+    <dt>Response file SHA-256</dt><dd>{{ audit.case_metadata.response_sha256 }}</dd>
+    <dt>Mapping verified</dt><dd>{{ audit.case_metadata.mapping_verified }}</dd>
+    <dt>Selection / mapping evidence</dt><dd>{{ audit.case_metadata.selection_reason }}</dd>
+    <dt>Context available at</dt><dd>{{ audit.case_metadata.context_available_at or 'Not recorded' }}</dd>
+    <dt>Task instructions</dt><dd>{{ audit.case_metadata.task_instructions or 'Not recorded' }}</dd>
+    {% endif %}
+  </dl>
+  {% if audit.case_metadata %}<details><summary>Complete incident manifest metadata</summary><pre>{{ audit.case_metadata | pretty_json }}</pre></details>
+  {% else %}<p class="notice">Additional incident metadata was not persisted in this older result. It cannot be reconstructed by rendering.</p>{% endif %}
+  <h4>Frozen incident context</h4>
+  <p class="muted">Includes title, severity, service and other incident attributes only if supplied in the snapshot; absent attributes are not inferred.</p>
+  {% if audit.context is not none %}<pre class="incident-context">{{ audit.context }}</pre>{% else %}<p class="muted">Context snapshot not recorded in this result; inspect any context evidence below.</p>{% endif %}
+</section>
+
+<section class="report-section" aria-label="Exact SRE agent response">
+  <h3>Exact SRE agent response evaluated</h3>
+  <p>The complete evaluated text is preserved below, without summarization or truncation. HTML is displayed as inert text, never executed. Claim quotations refer to this evaluated text.</p>
+  {% if audit.response_text %}<pre class="evaluated-response"><code>{{ audit.response_text | verbatim }}</code></pre>{% else %}<p class="notice">Evaluated response unavailable; see import or evaluation errors.</p>{% endif %}
+  {% if audit.response_raw is not none %}
+  <details><summary>Original response snapshot (before HTML-to-text normalization)</summary><pre class="original-response"><code>{{ audit.response_raw | verbatim }}</code></pre></details>
+  {% else %}<p class="muted">Original response snapshot not persisted in this result; only the evaluated text is available.</p>{% endif %}
+</section>
+
+<section class="report-section" aria-label="Initial plan and gate evaluation">
+  <h3>Initial plan and gate evaluation</h3>
+  {% if audit.todo %}
+  <p>Initial plan call <code>{{ audit.todo.source_call_id }}</code>, created {{ audit.todo.created_at }}.</p>
+  <ol>{% for step in audit.todo.steps %}<li><strong>{{ step.id }}: {{ step.title }}</strong> ({{ step.kind }})<p>{{ step.description }}</p>{% if step.condition %}<p>Condition: {{ step.condition }}</p>{% endif %}</li>{% endfor %}</ol>
+  <details><summary>Original todo payload</summary><pre>{{ audit.todo.raw }}</pre></details>
+  {% else %}<p class="notice">No usable initial todo plan was recorded. The gate cannot proceed.</p>{% endif %}
+  {% for role, vote in audit.gate_votes.items() %}
+  <div class="judge-result"><h4>{{ role }}: {{ vote.decision }}</h4><p class="full-rationale">{{ vote.rationale }}</p>{{ refs(vote.references) }}</div>
+  {% else %}<p class="muted">No gate votes recorded.</p>{% endfor %}
+  <p class="muted">The full per-model provenance and validation status appear under LLM-as-judge evaluations. A returned vote is not necessarily an accepted panel result.</p>
+</section>
+
+<section class="report-section" aria-label="Logical step scoring">
+  <h3>Logical step scoring</h3>
+  <p>{{ audit.included_count }} recorded included steps; {{ audit.excluded_count }} excluded steps. Calls, claims, evidence IDs and rationales are connected below.</p>
+  {% for step in audit.steps %}
+  <details class="step-audit" open>
+    <summary>{{ step.id }}: {{ step.title }} / {{ step.disposition }} / {{ step.score | number }}</summary>
+    <p><strong>Denominator:</strong> {{ 'Included' if step.included else 'Excluded' }}. <strong>Contribution to final response score:</strong> {{ step.contribution | number }} points.</p>
+    {% if step.binding %}<p><strong>Binding rationale:</strong> {{ step.binding.rationale }}</p>{{ refs(step.binding.condition_evidence) if step.binding.condition_evidence else '' }}
+    {% else %}<p class="muted">Binding rationale not recorded.</p>{% endif %}
+    <p><strong>Producing call IDs:</strong> {{ step.call_ids | join(', ') or 'None' }}. Complete inputs, results and timestamps are in the tool-call inventory.</p>
+    {% if step.structural %}<p class="notice">Structural zero, not four model scores of zero. Required work or material claim assignment is missing.</p>
+    {% elif not step.included %}<p>Excluded from aggregation; no score is assigned to this step.</p>
+    {% elif step.evaluated %}
+    <div class="table-scroll"><table>
+      <caption>Recorded dimension arithmetic for {{ step.id }}</caption>
+      <thead><tr><th>Dimension</th><th>Judgment</th><th>Weight</th><th>Weighted points</th></tr></thead>
+      <tbody>{% for term in step.terms %}<tr><th>{{ term.name }}</th><td>{{ term.value | number }}</td><td>{{ term.weight }}</td><td>{{ term.points | number }}</td></tr>{% endfor %}</tbody>
+      <tfoot><tr><th>Recorded step score</th><td colspan="3">{{ step.score | number }} / 100</td></tr></tfoot>
+    </table></div>
+    <p><strong>Faithfulness:</strong> votes {{ step.votes | pretty_json }}; recorded median = {{ step.faithfulness | number }}.</p>
+    <p><strong>Coverage:</strong> {{ step.coverage_explanation }} Recorded result = {{ step.coverage | number }}.</p>
+    {% for judge in step.judges if judge.role == 'gpt' %}
+    <p><strong>Source trust rationale ({{ judge.model }}):</strong> {{ judge.output.get('trust_rationale') or 'Not recorded' }}</p>
+    <p><strong>Applied policy IDs:</strong> {{ judge.output.get('trust_policy_ids', []) | join(', ') or 'None recorded' }}.</p>
+    {% endfor %}
+    <p><strong>Freshness:</strong> {{ step.freshness_reason or 'No reason recorded' }}. Recorded result = {{ step.freshness | number }}.</p>
+    {% else %}<p class="notice">Step evaluation did not complete. Missing dimension values are unavailable, not zero.</p>{% endif %}
+    {% for claim in step.claims %}
+    <div class="claim-result"><h4>Claim {{ claim.id }} ({{ claim.claim_type }})</h4><pre class="quotation">{{ claim.quote }}</pre>
+    {% for support in step.support if support.claim_id == claim.id %}<p><strong>{{ support.verdict }}:</strong> {{ support.rationale }}</p>{{ refs(support.references) }}
+    {% else %}<p class="muted">No completed claim-support evaluation for this claim.</p>{% endfor %}</div>
+    {% endfor %}
+    {% if step.limitations %}<ul>{% for reason in step.limitations %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+  </details>
+  {% else %}<p class="muted">No logical step scores were computed.</p>{% endfor %}
+  {% for step in audit.pending_steps %}<p class="notice">{{ step.id }}: {{ step.title }} / NOT_EVALUATED. Evaluation stopped before this planned step; it is not assigned a score.</p>{% endfor %}
+  <details><summary>Complete claim extraction and step bindings, including non-material claims</summary><pre>{{ {'claims': audit.claims, 'bindings': audit.bindings} | pretty_json }}</pre></details>
+</section>
+
+<section class="report-section" aria-label="LLM-as-judge evaluations">
+  <h3>LLM-as-judge evaluations</h3>
+  <p>Every recorded stage and panel slot is shown, with full returned rationales, evidence quotations, output and provenance. These are the judges' supplied explanations, not private model scratchpads. Replay and cached results are labeled; they are not fresh live calls.</p>
+  {% for evaluation in audit.evaluations %}
+  <details class="evaluation-audit" open>
+    <summary>{{ evaluation.stage }}{% if evaluation.step_id %} / {{ evaluation.step_id }}{% endif %} / {{ evaluation.status }}</summary>
+    {% if evaluation.status == 'VALIDATED' %}<p>All required responses and domain/reference checks completed for this stage.</p>
+    {% elif evaluation.status == 'LEGACY_RECORDS' %}<p class="notice">Older result: returned judgments are available, but evaluator input and explicit stage-validation status were not persisted.</p>
+    {% elif evaluation.status == 'NOT_INVOKED' %}<p class="muted">{{ evaluation.skipped_reason }} This is not a zero-scored evaluation.</p>
+    {% else %}<p class="notice">Evaluation failed or did not complete. Returned judgments below must not be mistaken for accepted scoring decisions.</p>{% endif %}
+    {% if evaluation.input and evaluation.input.error %}<p class="notice">{{ evaluation.input.error }}</p>{% endif %}
+    {% for panel in evaluation.judges %}
+    <div class="judge-result">
+      <h4>Panel slot: {{ panel.role }}</h4>
+      {% for judge in panel.records %}
+      <p><strong>Model:</strong> {{ judge.model }} / <strong>Mode:</strong> {{ judge.mode }} / <strong>{{ 'Returned faithfulness' if evaluation.stage == 'step' else 'Returned result' }}:</strong> {{ judge.output.get('decision', judge.output.get('faithfulness', 'Claim extraction and step mapping')) }}</p>
+      {% if judge.output.get('rationale') %}<p class="full-rationale">{{ judge.output.rationale }}</p>{% endif %}
+      {% if judge.output.get('trust_rationale') %}<p><strong>Source trust {{ judge.output.get('source_trust') }}:</strong> {{ judge.output.trust_rationale }}</p>{% endif %}
+      {{ refs(judge.output.get('references', [])) }}
+      {% for support in judge.output.get('claim_support', []) %}
+      <p><strong>Claim {{ support.claim_id }} / {{ support.verdict }}:</strong> {{ support.rationale }}</p>{{ refs(support.references) }}
+      {% endfor %}
+      <details><summary>Complete returned evaluation and provenance</summary>
+        <dl class="metadata"><dt>Request SHA-256</dt><dd>{{ judge.request_sha256 }}</dd><dt>Prompt SHA-256</dt><dd>{{ judge.prompt_sha256 }}</dd></dl>
+        <pre class="judge-output">{{ judge.output | pretty_json }}</pre>
+      </details>
+      {% else %}<p class="muted">{{ 'No valid response recorded; see the evaluation error.' if evaluation.status in ['FAILED', 'NOT_COMPLETED'] else 'No judge response recorded for this slot.' }}</p>{% endfor %}
+    </div>
+    {% endfor %}
+    {% if evaluation.input %}
+    <details><summary>Complete evaluator input: claims, tool calls, evidence and applicable policy</summary>
+      <p class="muted">Normalized evaluator payload before provider formatting. Evidence marked ineligible cannot support a valid citation. This is not a transcript of provider retries or a hidden reasoning trace.</p>
+      <pre class="evaluation-input">{{ evaluation.input.payload | pretty_json }}</pre>
+    </details>
+    {% else %}<p class="muted">No evaluator-input snapshot recorded for this stage.</p>{% endif %}
+  </details>
+  {% endfor %}
+</section>
+
+<section class="report-section" aria-label="Tool call inventory">
+  <h3>Tool call inventory</h3>
+  <p>These are frozen calls made by the SRE agent, not tools executed by the scorer. Transport success is distinct from evidence support and does not itself earn points.</p>
+  {% for call in audit.calls %}
+  <details class="tool-audit">
+    <summary>{{ call.id }} / {{ call.name }} / {{ call.status }}</summary>
+    <dl class="metadata">
+      <dt>Assigned scored steps</dt><dd>{{ call.step_ids | join(', ') or 'None (may be plan, posting, unused, or not yet mapped)' }}</dd>
+      <dt>Thread / trace</dt><dd>{{ call.thread_id }} / {{ call.trace_id }}</dd>
+      <dt>Started / completed</dt><dd>{{ call.started_at or 'Unknown' }} / {{ call.completed_at or 'Unknown' }}</dd>
+      <dt>Start records</dt><dd>{{ call.start_record_ids | join(', ') or 'None' }}</dd>
+      <dt>End records</dt><dd>{{ call.end_record_ids | join(', ') or 'None' }}</dd>
+      <dt>Quality flags</dt><dd>{{ call.quality_flags | join(', ') or 'None recorded' }}</dd>
+    </dl>
+    <h4>Exact logged input</h4><pre>{{ call.input_raw }}</pre>
+    <h4>Parsed input</h4><pre>{{ call.input | pretty_json }}</pre>
+    <h4>Exact logged result</h4><pre>{{ call.output_raw }}</pre>
+  </details>
+  {% else %}<p class="muted">No tool calls recorded.</p>{% endfor %}
+</section>
+
+<section class="report-section" aria-label="Source and Kusto evidence">
+  <h3>Source and Kusto evidence</h3>
+  <p>Full frozen source content and queries are retained, including scope/time filters present in the query. No live Kusto queries are run by this report. Eligibility is not a support verdict: compare the referenced evidence with each claim and judge rationale above.</p>
+  {% for item in audit.evidence %}
+  <details class="evidence-audit">
+    <summary>{{ item.id }} / {{ item.source_kind }} / {{ 'ELIGIBLE' if item.eligible else 'INELIGIBLE' }}</summary>
+    <dl class="metadata">
+      <dt>Source / origin</dt><dd>{{ item.origin }}</dd>
+      <dt>Producing call</dt><dd>{{ item.call_id or 'None' }}</dd>
+      <dt>Source record</dt><dd>{{ item.source_record_id or 'Not recorded' }}</dd>
+      <dt>Observed / completed</dt><dd>{{ item.observed_at or 'Unknown' }} / {{ item.completed_at or 'Unknown' }}</dd>
+      <dt>Quality flags</dt><dd>{{ item.quality_flags | join(', ') or 'None recorded' }}</dd>
+      <dt>Supplied to evaluator stages</dt><dd>{{ item.evaluations | join(', ') or 'None recorded (unused, ineligible, skipped, or older result)' }}</dd>
+    </dl>
+    <h4>Query</h4><pre class="evidence-query">{{ item.query or 'No query recorded for this evidence item.' }}</pre>
+    <h4>Evidence content / result</h4><pre class="evidence-content">{{ item.content }}</pre>
+  </details>
+  {% else %}<p class="muted">No source evidence recorded.</p>{% endfor %}
+  <h4>Referenced documents and freshness provenance</h4>
+  {% for document in audit.documents %}
+  <details class="document-audit">
+    <summary>doc:{{ document.id }} / {{ document.step_id }} / {{ document.status }}</summary>
+    <dl class="metadata">
+      <dt>Source URL</dt><dd>{{ document.url }}</dd>
+      <dt>Updated / retrieved</dt><dd>{{ document.last_updated or 'Unknown' }} / {{ document.retrieved_at or 'Unknown' }}</dd>
+      <dt>Historical version verified</dt><dd>{{ document.historical_version_verified }}</dd>
+      <dt>Version</dt><dd>{{ document.version or 'Unknown' }}</dd>
+      <dt>Content SHA-256</dt><dd>{{ document.content_sha256 or 'Not recorded' }}</dd>
+      <dt>Metadata provenance</dt><dd>{{ document.metadata_provenance or 'Not recorded' }}</dd>
+    </dl>
+    <p>{{ document.reason or 'See the assigned step for the freshness calculation.' }}</p>
+    <pre>{{ document.content or 'No eligible document content retained.' }}</pre>
+  </details>
+  {% else %}<p class="muted">No document records. Only completed steps explicitly using the no-document convention receive neutral freshness credit; a skipped evaluation earns no inferred credit.</p>{% endfor %}
+</section>

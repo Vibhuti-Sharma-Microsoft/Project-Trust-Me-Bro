@@ -28,7 +28,7 @@ __main__.py / installed console command
 3. **Gate:** `executor._panel()` calls all three judge roles concurrently. `scoring.gate_decision()` applies the majority rule. Failure means zero and stops; missing evidence or service errors are not invented votes.
 4. **Judge eligible steps:** GPT extracts exact response claims. The executor validates bindings, prepares referenced documents and calls the faithfulness panel. References must identify supplied, eligible evidence.
 5. **Calculate:** Python computes median faithfulness, discrete coverage, document age bands, source-policy ceilings, weighted step scores and mean included-step contribution. LLMs do not calculate the final score.
-6. **Persist/view:** `cli.main()` writes structured results and a private runtime audit. `report.render_report()` generates compact assets; the browser only switches already-computed cases and dimension summaries.
+6. **Persist/view:** `cli.main()` writes structured results and a private operational journal. `report.render_report()` generates one detailed report: response and incident context, step arithmetic, full judge rationales, evaluator-input/validation snapshots, tool calls and source evidence. The browser switches already-computed cases; it never invokes judges or logged tools. New provenance fields are optional for older persisted results, whose missing details are explicitly labeled.
 
 ### Invocation example that works with local synthetic data
 
@@ -50,7 +50,7 @@ Use the output directory printed by the command with `serve --directory <output-
 | Executor | Gate and stage sequencing | Implicit fallback models | `src\scoring_service\executor.py` |
 | Judge service | Prompt/schema construction, transport/replay, validated records | Incident writes or arbitrary tool calls | `src\scoring_service\judges.py` |
 | Scorer | `35*F + 35*C + 20*T + 10*P`, normalized aggregation | Changing rules based on prose | `src\scoring_service\scoring.py` |
-| Viewer | One selected incident and short dimension details | Starting a scoring run on a click | `src\scoring_service\report.py`, `assets\report.js` |
+| Viewer | One selected incident with a complete, escaped scoring and evidence audit | Starting a scoring run on a click or executing source markup | `src\scoring_service\report.py`, `templates\audit.html.j2`, `assets\report.js` |
 
 ## 4) Reused Patterns
 

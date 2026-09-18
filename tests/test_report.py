@@ -296,7 +296,8 @@ def test_archived_breakdowns_withhold_all_unverified_contributions(tmp_path: Pat
     assert all(node.text == "Unavailable" for node in page.nodes if "data-contribution" in node.attrs)
     assert "Recorded step notes for review" in page.text
     assert "verified incident contribution breakdown" in page.text
-    assert "35 x" not in path.read_text(encoding="utf-8")
+    assert "Final arithmetic unavailable" in page.text
+    assert all(dimension["points"] is None for dimension in view["dimensions"])
     assert case.model_dump_json() == original
 
 
@@ -350,25 +351,89 @@ def test_brief_dimension_specific_reasons_and_neutral_freshness(tmp_path: Path) 
     }.items():
         assert expected in host.find("template", **{"data-dimension-detail": key}).text
     assert "Model judgments differed; each step uses the median vote." in host.text
-    assert "EXCLUDED_REASON_SENTINEL" not in page.text
+    assert "EXCLUDED_REASON_SENTINEL" in page.text
+    assert "EXCLUDED_REASON_SENTINEL" not in host.find("template", **{"data-dimension-detail": "faithfulness"}).text
     assert "not verified freshness" in host.find("button", **{"data-dimension": "freshness"}).text
     doc = DocumentEvidence(id="d", url="https://example.test", step_id="step-1", status="AVAILABLE")
     view = report._case_view(_case(steps=[step], documents=[doc]), EvaluationConfig().weights)
     assert view["dimensions"][3]["neutral_count"] == 0
 
 
-def test_report_contains_no_raw_payload_even_in_templates(tmp_path: Path) -> None:
-    sentinel = "SENSITIVE_RAW_SENTINEL " * 5000
+def test_single_report_contains_complete_payloads_as_inert_text(tmp_path: Path) -> None:
+    sentinel = "SENSITIVE_RAW_SENTINEL " * 1000
     path, page = _render(tmp_path, _raw_case(sentinel), run_id=sentinel, policy_sha256=sentinel, policy_version=sentinel)
     html = path.read_text(encoding="utf-8")
-    assert "SENSITIVE_RAW_SENTINEL" not in html
-    assert len(html) < 40_000 and html.count("\n") < 400
-    assert not any(node.tag in {"table", "pre", "textarea", "iframe", "img", "object", "embed"} for node in page.nodes)
-    assert "application/json" not in html and "full_context" not in html
+    assert sentinel in html
+    assert page.find("pre", **{"class": "evaluated-response"}).text == sentinel
+    assert not any(node.tag in {"textarea", "iframe", "img", "object", "embed"} for node in page.nodes)
+    assert "application/json" not in html and "full_context" in html
+    for section in ("Incident metadata", "Exact SRE agent response", "LLM-as-judge evaluations",
+                    "Tool call inventory", "Source and Kusto evidence", "Score analysis and formula"):
+        assert page.find("section", **{"aria-label": section})
     assert "Observed signals support the response." in page.text
 
 
-def test_reason_previews_are_bounded_and_not_hidden_in_full(tmp_path: Path) -> None:
+def test_replay_rich_report_survives_persistence_with_all_details(corpus, tmp_path: Path) -> None:
+    from scoring_service.executor import evaluate_case
+
+    root, manifest, config = corpus
+    results = [evaluate_case(spec, root, config, tmp_path / "cache") for spec in manifest.cases]
+    batch = _batch(*results, weights=config.weights)
+    restored = BatchResult.model_validate_json(batch.model_dump_json())
+    path = report.render_report(restored, tmp_path / "report")
+    page = _Page(path.read_text(encoding="utf-8"))
+    host = page.find("div", id="scorecard-host")
+    assert host.find("pre", **{"class": "evaluated-response"}).text == results[0].response_text
+    assert host.find("pre", **{"class": "original-response"}).text == results[0].response_raw
+    assert host.find("p", **{"data-aggregation": "response"}).text == "(100) / 1 = 100.00 / 100."
+    for value in (manifest.cases[0].thread_id, manifest.cases[0].post_call_id,
+                  manifest.cases[0].response_sha256, manifest.cases[0].selection_reason):
+        assert value in host.text
+    assert "ServiceState | project region" in host.text
+    assert '"region":"eastus"' in host.text
+    assert "Synthetic one-step binding" in host.text
+    assert len([node for node in host.walk() if node.attrs.get("class") == "judge-output"]) == 7
+    assert len([node for node in host.walk() if node.attrs.get("class") == "evaluation-input"]) == 3
+    for judge in results[0].judges:
+        assert judge.model in host.text and judge.request_sha256 in host.text and judge.prompt_sha256 in host.text
+        if judge.output.get("rationale"):
+            assert judge.output["rationale"] in host.text
+    partial = page.find("template", **{"data-case-template": "case-1"})
+    assert "(65) / 1 = 65.00 / 100." in partial.text
+    assert "PARTIAL" in partial.text
+    contradicted = page.find("template", **{"data-case-template": "case-2"})
+    assert "CONTRADICTED" in contradicted.text
+    gate_failed = page.find("template", **{"data-case-template": "case-3"})
+    assert "NOT_EVALUATED" in gate_failed.text and "NOT_INVOKED" in gate_failed.text
+    assert not any(node.attrs.get("class") == "evidence-query" and node.text == "fabricated" for node in page.nodes)
+    assert "age exceeds 1095 days" in page.find("template", **{"data-case-template": "case-5"}).text
+    missing = page.find("template", **{"data-case-template": "case-8"})
+    assert "Structural zero" in missing.text and "(0) / 1 = 0.00 / 100." in missing.text
+    error = page.find("template", **{"data-case-template": "case-9"})
+    assert "FAILED" in error.text and "No valid response recorded" in error.text
+    assert "gemini" in error.text
+    assert {item.name for item in path.parent.iterdir()} == {"index.html", "report.css", "report.js"}
+
+
+def test_new_raw_surfaces_escape_hostile_content_and_preserve_whitespace(tmp_path: Path) -> None:
+    from scoring_service.models import EvaluationInput
+
+    attack = '</pre></details></template><img src="https://evil.test" onerror="alert(1)"><script>alert(1)</script>'
+    raw = "\n  Exact response\r\n\r\n" + attack + "\r  Last line  "
+    case = _raw_case(raw)
+    case.response_raw = raw
+    case.context = raw
+    case.evaluation_inputs = [EvaluationInput(stage="step", step_id="step-1", payload={"evidence": [{"id": "e", "content": raw}]})]
+    path, page = _render(tmp_path, case)
+    assert page.find("pre", **{"class": "evaluated-response"}).text == raw
+    assert page.find("pre", **{"class": "original-response"}).text == raw
+    assert raw in page.text
+    assert attack not in path.read_text(encoding="utf-8")
+    assert not any(node.tag in {"img", "iframe", "svg"} for node in page.nodes)
+    assert len([node for node in page.nodes if node.tag == "script"]) == 1
+
+
+def test_reason_previews_are_bounded_but_full_audit_is_not_truncated(tmp_path: Path) -> None:
     judges = [
         JudgeRecord(role="gpt", stage="step", step_id="step-1", model="m", request_sha256="h",
                     prompt_sha256="h", mode="replay",
@@ -377,7 +442,7 @@ def test_reason_previews_are_bounded_and_not_hidden_in_full(tmp_path: Path) -> N
     ]
     path, _ = _render(tmp_path, _case(judges=judges))
     html = path.read_text()
-    assert "DO_NOT_EMBED_TAIL" not in html and "Brief reason 2." not in html
+    assert "DO_NOT_EMBED_TAIL" in html and "Brief reason 19." in html
     assert "Brief reason 0." in html and "..." in html
     reasons = report._case_view(_case(judges=judges), EvaluationConfig().weights)["dimensions"][0]["reasons"]
     assert len(reasons) == 2 and all(len(reason) <= 180 for reason in reasons)
@@ -404,7 +469,8 @@ def test_identical_model_explanations_are_combined_without_zero_count_prose(tmp_
     assert "Each step uses the median model faithfulness vote." in detail.text
     for unwanted in ("0 at", "0 unavailable", "0 excluded", "0 structural", "disagree on 0", "Model judgments differed"):
         assert unwanted not in detail.text
-    assert "THIRD_EXPLANATION_SENTINEL" not in path.read_text(encoding="utf-8")
+    assert "THIRD_EXPLANATION_SENTINEL" in path.read_text(encoding="utf-8")
+    assert "THIRD_EXPLANATION_SENTINEL" not in detail.text
     assert case.model_dump_json() == original
 
 
@@ -434,13 +500,14 @@ def test_untrusted_markup_and_html_marked_strings_are_escaped(tmp_path: Path) ->
     "relative/path", "\x00https://example.test", "https://example.test/a?x=1&y=2#section",
     "HTTP://example.test/path", 'https://example.test/?q="<svg>',
 ])
-def test_source_urls_are_not_embedded_or_linked(tmp_path: Path, url: str) -> None:
+def test_source_urls_are_preserved_as_text_never_active_links(tmp_path: Path, url: str) -> None:
     path, page = _render(tmp_path, _case(
         evidence=[EvidenceItem(id="e", source_kind="source", origin=url, content="Text")],
         documents=[DocumentEvidence(id="d", url=url, step_id="step-1", status="MISSING")],
     ))
-    assert url not in path.read_text(encoding="utf-8")
+    assert url in page.text
     assert not any(node.tag == "a" for node in page.nodes)
+    assert not any(node.tag in {"svg", "iframe", "img"} for node in page.nodes)
 
 
 @pytest.mark.parametrize("selected", [0, 1, 10, 12])
@@ -468,7 +535,7 @@ def test_empty_batch_and_cli_owned_log_guidance(tmp_path: Path) -> None:
     path, page = _render(tmp_path, runtime_log_file=r"C:\private\context\scoring-service.log")
     assert "No incident results available" in page.text
     assert not any(node.tag == "select" for node in page.nodes)
-    assert page.find("code").text == "scoring-service.log"
+    assert "scoring-service.log" in page.text
     assert "private" not in path.read_text() and "PRIVATE_UNCHANGED" not in path.read_text()
     assert not any(node.tag == "a" for node in page.nodes)
     for name in ("results.json", "scoring-service.log"):
@@ -488,7 +555,8 @@ def test_render_never_fabricates_runtime_logs(tmp_path: Path, log_file: str | No
     assert not path.with_name("scoring-service.log").exists()
     assert not path.with_name("results.json").exists()
     html = path.read_text(encoding="utf-8")
-    assert ("Detailed diagnostics:" in html) == (log_file is not None)
+    assert ("and <code>scoring-service.log</code>" in html) == (log_file is not None)
+    assert "This is the single evaluation report." in html
 
 
 @contextmanager

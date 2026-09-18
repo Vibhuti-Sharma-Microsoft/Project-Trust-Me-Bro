@@ -44,6 +44,8 @@ def report_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser: Any) -
     second = _case(
         case_id="second", incident_id="incident-987", synthetic=True, score=50,
         steps=[_scored_step(values=(0.5, 0.5, 0.5, 0.5), freshness_reason="Document is within the partial freshness window.")],
+        response_text="\n  Exact evaluated response\r\nwith whitespace  \r",
+        response_raw="\r\n<p>Original &amp; response</p>\r",
     )
     gate = _case(
         case_id="gate", incident_id="incident-gate", status="GATE_FAILED", score=0, steps=[],
@@ -100,6 +102,8 @@ def test_selecting_one_incident_updates_title_score_and_tiles(report_page: tuple
     assert host.locator('[data-contribution="faithfulness"]').inner_text() == "17.50 pt"
     assert "Synthetic" in host.locator(".eyebrow").first.text_content()
     assert "incident-123" not in host.inner_text()
+    assert host.locator(".evaluated-response").text_content() == "\n  Exact evaluated response\r\nwith whitespace  \r"
+    assert host.locator(".original-response").text_content() == "\r\n<p>Original &amp; response</p>\r"
     assert page.locator("#selection-status").inner_text() == "Incident incident-987: SCORED, score 50.00."
 
 
@@ -185,7 +189,7 @@ def test_gate_failed_and_unscorable_are_distinct(report_page: tuple[Any, str, Pa
     assert host.locator('[data-score="total"]').inner_text() == "Unavailable"
     assert host.locator("[data-status]").inner_text() == "UNSCORABLE"
     assert host.locator("[data-contribution]").all_inner_texts() == ["Not computed"] * 4
-    assert "0.00" not in host.inner_text()
+    assert host.locator('[data-score="total"]').inner_text() != "0.00"
 
 
 def test_archived_mismatch_requires_review_without_invented_points(report_page: tuple[Any, str, Path]) -> None:
@@ -217,11 +221,12 @@ def test_error_dimensions_are_explicitly_not_computed(report_page: tuple[Any, st
     page.keyboard.press("Escape")
 
 
-def test_no_sensitive_payloads_remote_assets_or_private_file_serving(report_page: tuple[Any, str, Path]) -> None:
+def test_detailed_payloads_remain_inert_and_backing_files_are_not_served(report_page: tuple[Any, str, Path]) -> None:
     page, url, index = report_page
-    assert "BROWSER_SENSITIVE_RAW_SENTINEL" not in index.read_text(encoding="utf-8")
-    assert "BROWSER_SENSITIVE_RAW_SENTINEL" not in page.content()
-    assert page.locator("table, pre, script[type='application/json']").count() == 0
+    assert "BROWSER_SENSITIVE_RAW_SENTINEL" in index.read_text(encoding="utf-8")
+    assert page.locator("#scorecard-host .evaluated-response").text_content() == "BROWSER_SENSITIVE_RAW_SENTINEL " * 2000
+    assert page.locator("script[type='application/json']").count() == 0
+    assert page.locator("#scorecard-host table").count() > 0
     assert page.locator("script").count() == 1
     assert page.locator("script").get_attribute("src") == "report.js"
     for name in ("results.json", "scoring-service.log"):

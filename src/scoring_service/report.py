@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import ipaddress
+import json
 import math
 import os
 import socket
@@ -16,6 +17,7 @@ from typing import Any, BinaryIO
 from urllib.parse import unquote, urlsplit
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from markupsafe import Markup, escape
 
 from .models import BatchResult, CaseResult, StepResult
 
@@ -36,6 +38,11 @@ _STRUCTURAL = {"MISSING_REQUIRED", "UNASSIGNED"}
 
 def _number(value: float | None) -> str:
     return "Unavailable" if value is None or not math.isfinite(value) else f"{value:.2f}"
+
+
+def _verbatim(value: str) -> Markup:
+    # Character references preserve CR/CRLF instead of HTML's newline normalization.
+    return escape(str(value)).replace("\r", Markup("&#13;"))
 
 
 def _brief(value: object, limit: int = 180) -> str:
@@ -176,7 +183,7 @@ def _breakdown_consistency(case: CaseResult, weights: dict[str, int]) -> bool | 
 
 
 def _case_view(case: CaseResult, weights: dict[str, int]) -> dict[str, Any]:
-    """Return a verified compact scorecard; withhold unverifiable contributions."""
+    """Return a verified summary plus the complete, inert evaluation audit."""
     dimensions = [_dimension_view(case, key, weights[key]) for key in _DIMENSIONS]
     score = case.score if case.status in {"SCORED", "GATE_FAILED"} else None
     if score is not None and not math.isfinite(score):
@@ -213,9 +220,9 @@ def _case_view(case: CaseResult, weights: dict[str, int]) -> dict[str, Any]:
                 dimension["label"] = "Unavailable"
                 dimension["calculation"] = status_note + " Missing scores are not zero; no contribution points are inferred."
     return {
-        "case_id": _brief(case.case_id, 80),
-        "incident_id": _brief(case.incident_id, 96),
-        "message_id": _brief(case.message_id, 96),
+        "case_id": str(case.case_id),
+        "incident_id": str(case.incident_id),
+        "message_id": str(case.message_id),
         "synthetic": case.synthetic,
         "status": str(case.status),
         "score": score,
@@ -223,7 +230,109 @@ def _case_view(case: CaseResult, weights: dict[str, int]) -> dict[str, Any]:
         "dimensions": dimensions,
         "consistency_state": consistency_state,
         "consistency": consistency,
+        "audit": _audit_view(case, weights, consistency_state == "match"),
     }
+
+
+def _audit_view(case: CaseResult, weights: dict[str, int], verified: bool) -> dict[str, Any]:
+    # A JSON round-trip strips HTML-safe string subclasses from untrusted nested values.
+    audit = json.loads(case.model_dump_json())
+    included = [step for step in case.steps if step.included]
+    audit["included_count"] = len(included)
+    audit["excluded_count"] = len(case.steps) - len(included)
+    audit["aggregation"] = (
+        f"({' + '.join(f'{step.score:g}' for step in included)}) / {len(included)}"
+        f" = {_number(case.score)} / 100."
+        if verified else "Final arithmetic unavailable; see the gate, status and validation details."
+    )
+    audit["analysis"] = []
+    if verified:
+        audit["analysis"].append(
+            f"{len(included)} logical steps share equal weight; "
+            f"{len(case.steps) - len(included)} excluded steps do not enter the denominator."
+        )
+        for key, (name, _) in _DIMENSIONS.items():
+            points = weights[key] * math.fsum(
+                getattr(step, key) for step in included
+                if step.disposition not in _STRUCTURAL
+            ) / len(included)
+            audit["analysis"].append(
+                f"{name} earned {_number(points)} of {weights[key]} possible points; "
+                f"{_number(weights[key] - points)} points were not earned. "
+                "Step-level reasons and model votes are recorded below."
+            )
+    verdicts = [support for step in case.steps for support in step.support]
+    for verdict in ("SUPPORTED", "PARTIAL", "UNSUPPORTED", "CONTRADICTED"):
+        ids = [support.claim_id for support in verdicts if support.verdict == verdict]
+        if ids:
+            audit["analysis"].append(f"{verdict}: {len(ids)} claim(s) ({', '.join(ids)}).")
+    for step, row in zip(case.steps, audit["steps"]):
+        row["contribution"] = step.score / len(included) if verified and step.included and step.score is not None else None
+        row["terms"] = [
+            {"name": name, "weight": weights[key], "value": getattr(step, key),
+             "points": weights[key] * getattr(step, key) if getattr(step, key) is not None else None}
+            for key, (name, _) in _DIMENSIONS.items()
+        ]
+        row["binding"] = next((binding for binding in audit["bindings"] if binding["step_id"] == step.id), None)
+        row["claims"] = [claim for claim in audit["claims"] if claim["id"] in step.claim_ids]
+        row["judges"] = [record for record in audit["judges"] if record["stage"] == "step" and record["step_id"] == step.id]
+        row["evaluated"] = all(getattr(step, key) is not None for key in _DIMENSIONS) and step.score is not None
+        row["structural"] = step.disposition in _STRUCTURAL
+        row["coverage_explanation"] = (
+            "All assigned material claims are SUPPORTED, so coverage = 1."
+            if step.support and all(item.verdict == "SUPPORTED" for item in step.support)
+            else "At least one claim is SUPPORTED or PARTIAL, but not all are SUPPORTED, so coverage = 0.5."
+            if any(item.verdict in {"SUPPORTED", "PARTIAL"} for item in step.support)
+            else "No assigned claim has SUPPORTED or PARTIAL support, so coverage = 0."
+        ) if row["evaluated"] else "Coverage was not evaluated."
+    audit["pending_steps"] = [
+        step.model_dump(mode="json") for step in case.todo.steps
+        if step.id not in {result.id for result in case.steps}
+    ] if case.todo else []
+    stages: list[tuple[str, str | None]] = [("todo_gate", None), ("claims", None)]
+    stages.extend(("step", step.id) for step in case.steps)
+    stages.extend(("step", step["id"]) for step in audit["pending_steps"])
+    for record in [*case.judges, *case.evaluation_inputs]:
+        if (record.stage, record.step_id) not in stages:
+            stages.append((record.stage, record.step_id))
+    audit["evaluations"] = []
+    for stage, step_id in stages:
+        input_record = next((entry for entry in audit["evaluation_inputs"]
+                             if entry["stage"] == stage and entry["step_id"] == step_id), None)
+        records = [record for record in audit["judges"] if record["stage"] == stage and record["step_id"] == step_id]
+        step = next((step for step in case.steps if step.id == step_id), None)
+        skipped_reason = (
+            "Older result: no invocation snapshot was persisted."
+            if case.case_metadata is None else
+            "The initial plan or verified context was unavailable."
+            if stage == "todo_gate" and not records else
+            f"Step disposition {step.disposition}: no semantic panel is required."
+            if step and (not step.included or step.disposition in _STRUCTURAL) else
+            f"Evaluation stopped before this stage. Case status: {case.status}."
+        )
+        audit["evaluations"].append({
+            "stage": stage, "step_id": step_id, "input": input_record,
+            "status": input_record["status"] if input_record else
+                      "LEGACY_RECORDS" if records else "NOT_INVOKED",
+            "judges": [
+                {"role": role, "records": [record for record in records if record["role"] == role]}
+                for role in (("gpt",) if stage == "claims" else ("gpt", "claude", "gemini"))
+            ],
+            "skipped_reason": skipped_reason,
+        })
+    audit["trust_rules"] = next((
+        entry["payload"]["trust_rules"] for entry in audit["evaluation_inputs"]
+        if entry["stage"] == "step" and "trust_rules" in entry["payload"]
+    ), None)
+    for call in audit["calls"]:
+        call["step_ids"] = [step.id for step in case.steps if call["id"] in step.call_ids]
+    for item in audit["evidence"]:
+        item["evaluations"] = [
+            f"{entry.stage}{':' + entry.step_id if entry.step_id else ''}"
+            for entry in case.evaluation_inputs
+            if any(evidence.get("id") == item["id"] for evidence in entry.payload.get("evidence", []))
+        ]
+    return audit
 
 
 def _reject_links(path: Path) -> None:
@@ -265,22 +374,25 @@ def _write_asset(directory: Path, name: str, content: bytes) -> None:
 
 
 def render_report(batch: BatchResult, output_dir: Path) -> Path:
-    """Write compact index.html, report.css and report.js; leave CLI-owned files alone."""
+    """Write one detailed report and its local assets; leave backing artifacts alone."""
     package = Path(__file__).parent
     environment = Environment(
         loader=FileSystemLoader(package / "templates"),
         autoescape=select_autoescape(("html", "xml", "j2"), default=True),
         undefined=StrictUndefined,
     )
-    environment.filters.update(number=_number)
+    environment.filters.update(
+        number=_number, verbatim=_verbatim,
+        pretty_json=lambda value: json.dumps(value, ensure_ascii=False, indent=2),
+    )
     real_count = sum(not case.synthetic for case in batch.results)
-    # Never pass BatchResult/model dumps to the template: even inert payloads leak raw data.
     html = environment.get_template("report.html.j2").render(
         cases=[_case_view(case, batch.weights) for case in batch.results],
         real_count=real_count,
         has_synthetic=any(case.synthetic for case in batch.results),
         target_real_cases=batch.target_real_cases,
         runtime_log_name=_brief(PureWindowsPath(batch.runtime_log_file).name, 80) if batch.runtime_log_file else None,
+        run=json.loads(batch.model_dump_json(exclude={"results"})),
     )
     assets = {name: (package / "assets" / name).read_bytes() for name in _ASSETS if name != "index.html"}
     output_dir = output_dir.absolute()

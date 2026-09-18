@@ -63,11 +63,35 @@ dialog::backdrop { background: #152a47aa; }
 .reasons { padding-left: 1.2rem; }
 .reasons li { margin: .5rem 0; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.report-section { border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1.25rem; min-width: 0; }
+.report-section h3 { margin: 0 0 1rem; font-size: 1.2rem; }
+.report-section h4 { margin: 1rem 0 .5rem; }
+.report-section p, .report-section li { margin-top: .65rem; overflow-wrap: anywhere; }
+.formula { padding: 1rem; background: #edf4fb; border-radius: 6px; font-variant-numeric: tabular-nums; }
+.analysis-finding { border-left: 3px solid var(--accent); padding-left: .8rem; }
+.metadata { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 3fr); gap: .5rem 1rem; font-size: .86rem; }
+dt { font-weight: 650; }
+dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre { padding: 1rem; background: #f4f7fa; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; font: .83rem/1.55 ui-monospace, Consolas, monospace; tab-size: 2; }
+code { overflow-wrap: anywhere; }
+.quotation { border-left: 3px solid var(--accent); }
+details { margin: 1rem 0; padding: .85rem; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+summary { cursor: pointer; font-weight: 650; overflow-wrap: anywhere; }
+summary:focus-visible { outline: 3px solid #ac5a00; outline-offset: 4px; }
+.judge-result, .claim-result { border-left: 3px solid var(--line); padding-left: 1rem; margin: 1rem 0; }
+.full-rationale { white-space: pre-wrap; }
+.references { padding-left: 1.25rem; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .85rem; }
+caption { text-align: left; font-weight: 650; padding-bottom: .5rem; }
+th, td { text-align: left; border-bottom: 1px solid var(--line); padding: .55rem; font-variant-numeric: tabular-nums; }
 @media (max-width: 700px) {
   main { padding: 1.25rem 1rem; }
   .scorecard { padding: 1rem; }
   .dimensions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .card-header { flex-direction: column; gap: .7rem; }
+  .metadata { grid-template-columns: 1fr; }
+  dd { margin-bottom: .5rem; }
 }
 @media (max-width: 360px) {
   .dimensions { grid-template-columns: 1fr; }
@@ -76,5 +100,6 @@ dialog::backdrop { background: #152a47aa; }
   body { background: white; }
   main { max-width: none; padding: 0; }
   .selector, .tile-action, .log-guidance { display: none; }
-  .scorecard { break-inside: avoid; }
+  pre { max-height: none; overflow: visible; }
+  details { break-inside: auto; }
 }

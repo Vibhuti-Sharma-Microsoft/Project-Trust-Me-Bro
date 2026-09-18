@@ -38,7 +38,7 @@ def parser() -> argparse.ArgumentParser:
     split.add_argument("--input", type=Path, action="append", required=True)
     split.add_argument("--incident-id", required=True)
     split.add_argument("--directory", type=Path, required=True)
-    evaluate = commands.add_parser("evaluate", help="Evaluate selected local cases and produce JSON/HTML")
+    evaluate = commands.add_parser("evaluate", help="Evaluate selected local cases and produce one detailed HTML report")
     evaluate.add_argument("--manifest", type=Path, default=Path("data/real-pilot/cases.json"))
     evaluate.add_argument("--config", type=Path, default=Path("config/evaluation.local.json"))
     evaluate.add_argument("--case", action="append", default=[])
@@ -136,7 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 journal.event("run.failed", error_type=type(exc).__name__, error=str(exc), stack_trace=traceback.format_exc())
                 raise
-        print(f"Scorecard: {report}\nDetailed runtime log: {log_path}\nResults: {output_dir / 'results.json'}")
+        print(f"Evaluation report: {report}")
         print(f"Cases: {len(results)}; real: {batch.selected_real_cases}/{batch.target_real_cases}; "
               f"synthetic: {sum(case.synthetic for case in selected)}")
         return 1 if any(result.status in {"UNSCORABLE", "JUDGE_ERROR", "IMPORT_ERROR"} for result in results) else 0

@@ -14,7 +14,7 @@
 <article class="scorecard" data-case-key="{{ key }}" aria-labelledby="incident-title">
   <header class="card-header">
     <div>
-      <p class="eyebrow">Incident scorecard{% if case.synthetic %} / Synthetic{% endif %}</p>
+      <p class="eyebrow">Incident evaluation report{% if case.synthetic %} / Synthetic{% endif %}</p>
       <h2 id="incident-title">Incident {{ case.incident_id }}</h2>
       <p class="identity">First diagnostic message {{ case.message_id }} / {{ case.case_id }}</p>
     </div>
@@ -54,6 +54,7 @@
     {% else %}<p class="detail-note">{{ case.status_note }}</p>{% endif %}
   </template>
   {% endfor %}
+  {% include 'audit.html.j2' %}
 </article>
 {%- endmacro %}
 <main>
@@ -61,6 +62,8 @@
     <p class="eyebrow">Local evidence review</p>
     <h1>Scoring Service</h1>
     <p class="muted">Uncalibrated evidence index, not a probability of correctness.</p>
+    <p class="fine-print">Run {{ run.run_id }} / {{ run.created_at }} / Policy {{ run.policy_version }}</p>
+    <p class="notice fine-print">Private incident report: contains response text, incident context, tool inputs/results and evidence. Keep it local and share only through approved channels. Source URLs and agent HTML are inert text.</p>
   </header>
   {% if cases %}
   <div class="selector">
@@ -75,7 +78,7 @@
   <p id="selection-status" class="sr-only" role="status" aria-live="polite"></p>
   <noscript><p class="notice">Enable local JavaScript to switch incidents and open dimension explanations. Only the first incident is shown without JavaScript.</p></noscript>
   {% else %}<p class="empty">No incident results available.</p>{% endif %}
-  {% if runtime_log_name %}<p class="log-guidance muted fine-print">Detailed diagnostics: open <code>{{ runtime_log_name }}</code> locally. Runtime logs and results.json are not served.</p>{% endif %}
+  <p class="log-guidance muted fine-print">This is the single evaluation report. All recorded scoring details are included here. <code>results.json</code>{% if runtime_log_name %} and <code>{{ runtime_log_name }}</code>{% endif %} are backing artifacts for re-rendering and operational troubleshooting, not additional reports; they are not served.</p>
 </main>
 <dialog id="dimension-dialog" aria-labelledby="dimension-title" aria-describedby="dimension-definition">
   <header class="dialog-header">
