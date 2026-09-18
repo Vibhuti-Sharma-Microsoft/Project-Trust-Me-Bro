@@ -3,13 +3,16 @@ from scoring_service.cli import parser
 from scoring_service.models import BatchResult
 
 
-def test_cli_evaluates_and_renders_without_network(corpus, tmp_path):
+def test_cli_evaluates_and_renders_without_network(corpus, tmp_path, capsys):
     root, _, _ = corpus
     out = tmp_path / "out"
     result = main(["evaluate", "--manifest", str(root / "cases.json"), "--config", str(root / "evaluation.json"),
                    "--judge-mode", "replay", "--out", str(out), "--run-id", "test",
                    "--case", "synthetic-supported"])
     assert result == 0
+    output = capsys.readouterr().out
+    assert output.count("Evaluation report:") == 1
+    assert "Detailed runtime log:" not in output and "Results:" not in output
     batch = BatchResult.model_validate_json((out / "test" / "results.json").read_text())
     assert batch.results[0].score == 100
     assert batch.selected_real_cases == 0

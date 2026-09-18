@@ -308,6 +308,16 @@ def test_close_is_idempotent_and_original_body_exception_preserved(tmp_path):
         journal.__enter__()
 
 
+def test_windows_opener_rejects_other_platforms_before_native_imports(tmp_path, monkeypatch):
+    import scoring_service.runtime_log as runtime_log
+
+    with monkeypatch.context() as platform:
+        platform.setattr(runtime_log.sys, "platform", "linux")
+        with pytest.raises(RuntimeLogError, match="requires Windows"):
+            runtime_log._open_windows(tmp_path / "scoring-service.log")
+    assert not (tmp_path / "scoring-service.log").exists()
+
+
 def test_open_error_is_explicit_and_chained(tmp_path, monkeypatch):
     import scoring_service.runtime_log as runtime_log
 

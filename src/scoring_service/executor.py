@@ -16,7 +16,7 @@ from .judges import JudgeError, JudgeService
 from .runtime_log import RuntimeJournal, RuntimeLogError
 from .models import (
     CaseResult, CaseSpec, ClaimsDecision, DocumentEvidence, EvidenceItem,
-    GateVote, ModelRole, ResponseBundle, Stage, StepJudgment, StepResult,
+    EvaluationInput, GateVote, ModelRole, ResponseBundle, Stage, StepJudgment, StepResult,
     TodoPlan,
 )
 from .scoring import (
@@ -143,7 +143,7 @@ def _evaluate_case(
 ) -> CaseResult:
     result = CaseResult(case_id=case.id, incident_id=case.incident_id, message_id=case.message_id,
                         synthetic=case.synthetic, status="IMPORT_ERROR", score=None,
-                        cutoff=case.cutoff, policy_sha256=config.policy_sha256)
+                        cutoff=case.cutoff, policy_sha256=config.policy_sha256, case_metadata=case)
     try:
         bundle = build_bundle(case, root)
     except (ValueError, OSError, UnicodeError) as exc:
@@ -152,6 +152,8 @@ def _evaluate_case(
         _emit(journal, "import.failed", case.id, error_type=type(exc).__name__, error=str(exc))
         return result
     result.response_text = bundle.response_text
+    result.response_raw = bundle.response_raw
+    result.context = bundle.context
     result.todo = bundle.todo
     result.calls = bundle.calls
     result.evidence = bundle.evidence
@@ -189,12 +191,15 @@ def _evaluate_case(
             "todo": bundle.todo.model_dump(mode="json"),
             "evidence": [item.model_dump(mode="json") for item in gate_evidence],
         }
+        gate_input = EvaluationInput(stage="todo_gate", payload=gate_payload)
+        result.evaluation_inputs.append(gate_input)
         votes = cast(dict[str, GateVote], _panel(service, "todo_gate", gate_payload, journal=journal))
         for vote in votes.values():
             validate_references(vote.references, gate_reference_evidence)
             if vote.decision in {"PASS", "FAIL"} and not vote.references:
                 raise ValueError("A decisive todo vote must cite supplied context or the plan")
         result.gate_votes = votes
+        gate_input.status = "VALIDATED"
         gate = gate_decision(votes)
         _emit(journal, "gate.decided", case.id, decision=gate,
               rule="All three valid responses required; majority PASS/FAIL, otherwise insufficient evidence.",
@@ -211,9 +216,13 @@ def _evaluate_case(
             "calls": [call.model_dump(mode="json") for call in bundle.calls if call.id != case.post_call_id],
             "evidence": [item.model_dump(mode="json") for item in bundle.evidence if item.eligible],
         }
+        claims_input = EvaluationInput(stage="claims", payload=claims_payload)
+        result.evaluation_inputs.append(claims_input)
         decision = cast(ClaimsDecision, _judge(service, "gpt", "claims", claims_payload, journal=journal))
         _validate_claims(decision, bundle)
+        claims_input.status = "VALIDATED"
         result.claims = decision.claims
+        result.bindings = decision.bindings
         _emit(journal, "claims.validated", case.id, claims=decision.model_dump(mode="json"))
         if not any(claim.material for claim in decision.claims):
             result.status = "NOT_APPLICABLE"
@@ -235,11 +244,11 @@ def _evaluate_case(
             step_result = StepResult(id=step.id, title=step.title, disposition=binding.disposition,
                                      included=binding.disposition not in {"HOUSEKEEPING", "NOT_APPLICABLE"},
                                      call_ids=binding.call_ids, claim_ids=[claim.id for claim in claims])
+            result.steps.append(step_result)
             _emit(journal, "step.started", case.id, step=step.model_dump(mode="json"),
                   binding=binding.model_dump(mode="json"), assigned_claims=[claim.model_dump(mode="json") for claim in claims])
             if not step_result.included:
                 step_result.limitations.append(binding.rationale)
-                result.steps.append(step_result)
                 _emit(journal, "step.excluded", case.id, step=step_result.model_dump(mode="json"),
                       rule="Housekeeping or evidence-backed conditional exclusion; not in the scoring denominator.")
                 continue
@@ -247,7 +256,6 @@ def _evaluate_case(
                 step_result.disposition = "MISSING_REQUIRED"
                 step_result.score = 0.0
                 step_result.limitations.append("Required work, response claims, or producing calls are missing; denominator retained.")
-                result.steps.append(step_result)
                 _emit(journal, "step.missing_required", case.id, step=step_result.model_dump(mode="json"),
                       contribution=0, denominator_retained=True)
                 continue
@@ -256,7 +264,6 @@ def _evaluate_case(
                 step_result.disposition = "MISSING_REQUIRED"
                 step_result.score = 0.0
                 step_result.limitations.append("No eligible pre-cutoff producing result exists; context cannot substitute for missing required work.")
-                result.steps.append(step_result)
                 _emit(journal, "step.missing_required", case.id, step=step_result.model_dump(mode="json"),
                       contribution=0, denominator_retained=True)
                 continue
@@ -284,6 +291,8 @@ def _evaluate_case(
                 "trust_rules": [rule.model_dump(mode="json") for rule in config.trust_rules],
                 "response_cutoff": case.cutoff,
             }
+            step_input = EvaluationInput(stage="step", step_id=step.id, payload=step_payload)
+            result.evaluation_inputs.append(step_input)
             judgments = cast(dict[str, StepJudgment], _panel(service, "step", step_payload, step.id, journal))
             for judgment in judgments.values():
                 validate_references(judgment.references, step_evidence)
@@ -298,6 +307,7 @@ def _evaluate_case(
                 if support.verdict in {"SUPPORTED", "PARTIAL", "CONTRADICTED"} and not support.references:
                     raise ValueError("A claim-support verdict requires evidence")
             validate_trust(gpt, step_evidence, config)
+            step_input.status = "VALIDATED"
             f = faithfulness(judgments)
             c = coverage(gpt.claim_support)
             t = gpt.source_trust
@@ -314,7 +324,6 @@ def _evaluate_case(
                 step_result.limitations.append("Faithfulness judges disagree; displayed score uses the median.")
             step_result.limitations.extend(f"{item.id}: {', '.join(item.quality_flags)}" for item in step_evidence if item.quality_flags)
             step_result.limitations.extend(doc.reason for doc in docs if doc.reason)
-            result.steps.append(step_result)
             _emit(journal, "step.scored", case.id, step=step_result.model_dump(mode="json"),
                   calculations={
                       "faithfulness": {"votes": step_result.votes, "operator": "median", "result": f},
@@ -343,6 +352,9 @@ def _evaluate_case(
         result.status = "SCORED" if result.score is not None else "UNSCORABLE"
         return result
     except (JudgeError, ValueError, OSError) as exc:
+        if result.evaluation_inputs and result.evaluation_inputs[-1].status == "NOT_COMPLETED":
+            result.evaluation_inputs[-1].status = "FAILED"
+            result.evaluation_inputs[-1].error = str(exc)
         if isinstance(exc, PanelFailure) and exc.stage == "todo_gate":
             result.gate_votes = {role: vote for role, vote in exc.partial.items() if isinstance(vote, GateVote)}
         result.status = "JUDGE_ERROR"

@@ -1,6 +1,6 @@
 # Scoring Service
 
-A local, response-level evidence scorer. It reads frozen incident/log files, evaluates the initial todo plan, scores logical response-supporting steps, and writes a minimal incident scorecard plus separate detailed results and runtime logs. It never executes the SRE agent's logged tools or writes to IcM.
+A local, response-level evidence scorer. It reads frozen incident/log files, evaluates the initial todo plan, scores logical response-supporting steps, and writes one detailed incident evaluation report. It never executes the SRE agent's logged tools or writes to IcM.
 
 **Current scope:** four tri-valued dimensions and an initial-todo gate. This is an uncalibrated evidence index, not a probability of correctness. The bundled demo is **ten synthetic cases**, not ten collected real incidents.
 
@@ -15,7 +15,7 @@ Local case manifest + frozen incident/log snapshots
   -> GPT claim/step mapping
   -> three-model faithfulness + GPT source trust
   -> deterministic coverage, document freshness, weighted scoring
-  -> single-incident HTML scorecard + results.json + scoring-service.log
+  -> one detailed HTML report (with JSON and runtime-log backing artifacts)
 ```
 
 Incident and telemetry reads are local during execution. Live judging and permitted document fetching are optional, explicit modes. The normal replay demo does not contact Azure, IcM, or a model provider.
@@ -57,9 +57,13 @@ No credentials or network access are needed for replay:
 
 Open `http://127.0.0.1:8765`. You can also open `out\demo\index.html` directly.
 
-Select one incident from the dropdown. The scorecard shows its total and four clickable dimension contributions. Clicking a dimension opens a brief definition, calculation and case-specific explanation. Dimension tiles show their weighted **points toward the total**, not newly averaged 0/0.5/1 judgments; individual step judgments and scoring rules are unchanged.
+Select one incident from the dropdown. The report shows its total and four clickable dimension contributions, followed by the complete audit in the same page. Dimension tiles show their weighted **points toward the total**, not newly averaged 0/0.5/1 judgments; individual step judgments and scoring rules are unchanged.
 
-The HTML deliberately omits raw telemetry, full prompts, lengthy evidence dumps and all-case diagnostic tables. Gate failures and unavailable results remain distinct. Detailed evaluator input, decisions, citations and arithmetic are written separately to `out\<run-id>\scoring-service.log`.
+Every selection displays that incident's stored response and original snapshot, with its incident/message identity beside the response. Synthetic fixtures are for explicit demo/replay runs only, not a substitute for the real incident CSV exports. Several fixtures intentionally share response text; rendering preserves the selected input rather than inventing a different response.
+
+The single report includes the exact evaluated SRE response and original snapshot, incident identity and frozen context, scoring formula and substituted arithmetic, each logical step's contribution and exclusions, claim verdicts, every recorded model's full rationale and evidence references, model/mode/hash provenance, evaluator input snapshots, logged tool inputs/results, Kusto queries/results, source eligibility and document freshness provenance. Expand sections to inspect long payloads; they are not truncated. Input snapshots describe normalized evaluator payloads, not provider retry transcripts or hidden model reasoning.
+
+Gate failures, skipped evaluations, partial judge panels and unavailable results remain distinct. **The HTML now contains private incident data**, not just a minimal scorecard. It displays agent HTML and source URLs as inert escaped text, loads no remote assets, and remains loopback-only when served. Share it only through approved channels. JSON and runtime logs remain local backing artifacts; reading them is not required to understand the scores.
 
 The demo intentionally contains gate failure, missing todo, and judge-error cases. Consequently, its batch `evaluate` command returns exit code **1**, while still writing the complete report. Successful cases and gate-failed score-zero cases are not execution errors.
 
@@ -315,9 +319,9 @@ Each new evaluation produces:
 
 | File | Purpose |
 |---|---|
-| `index.html`, `report.css`, `report.js` | Minimal single-incident scorecard with clickable dimension explanations |
-| `results.json` | Complete structured result: evidence references, gate votes, claims, step judgments and versions |
-| `scoring-service.log` | Detailed chronological JSON Lines runtime audit, kept separate from the scorecard |
+| `index.html`, `report.css`, `report.js` | One rich report with summary, response, metadata, step arithmetic, full judge reasoning and evidence |
+| `results.json` | Machine-readable backing artifact, including metadata, original response, validated bindings and stage-input/status snapshots for faithful re-rendering |
+| `scoring-service.log` | Operational JSON Lines journal for chronological troubleshooting, not a second report |
 
 The runtime log records import/cutoff decisions, initial todo selection, each judge's input and returned explanation, gate decisions, claim/step mappings, document availability, exclusions, dimension calculations, weighted contributions and failures. It includes supplied judge rationales, not private model scratchpads. Explicit credential fields and conventional credential strings are masked; private incident content can still be present, so keep the log in ignored `out\` and share only through approved channels.
 
@@ -330,7 +334,7 @@ Get-Content out\demo\scoring-service.log |
     ConvertTo-Json -Depth 100
 ```
 
-`render` rebuilds the compact UI without live calls and does not invent a runtime log for an older result. Null scores remain null; a batch never hides unscorable/error cases or relabels them as score 0.
+`render` rebuilds the complete report without live calls. Older results still render all stored response/evidence/judge details, but missing original-response, metadata, binding and evaluator-input fields are explicitly labeled unavailable; rendering cannot reconstruct them or invent a runtime log. A new evaluation is needed to capture those fields. Null scores remain null; a batch never hides unscorable/error cases or relabels them as score 0.
 
 Exit codes: 0 = command completed without unscorable/error cases, 1 = evaluated batch contains unavailable/error cases, 2 = invalid configuration/input/command state, 130 = interrupted.
 

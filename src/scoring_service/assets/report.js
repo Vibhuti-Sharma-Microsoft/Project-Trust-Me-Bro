@@ -53,7 +53,7 @@
     activeTile = tile;
     title.textContent = `${tile.querySelector(".dimension-name").textContent} contribution`;
     incident.textContent = host.querySelector("#incident-title").textContent;
-    // Only clone autoescaped, compact server-rendered templates; never interpret data as HTML.
+    // Only clone autoescaped server-rendered templates; never interpret data as HTML.
     content.replaceChildren(detail.content.cloneNode(true));
     tile.setAttribute("aria-expanded", "true");
     dialog.showModal();

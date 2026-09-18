@@ -5,6 +5,7 @@ import math
 import os
 import re
 import stat
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,6 +223,8 @@ def _open_posix(path: Path) -> int:
 
 
 def _open_windows(path: Path) -> int:
+    if sys.platform != "win32":
+        raise RuntimeLogError("Windows runtime log creation requires Windows")
     import ctypes
     import msvcrt
     from ctypes import wintypes

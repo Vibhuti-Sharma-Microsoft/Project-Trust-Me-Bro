@@ -350,6 +350,6 @@ def build_bundle(case: CaseSpec, corpus_root: Path) -> ResponseBundle:
                 content=content, source_record_id=_row_id(row), observed_at=str(row["timestamp"]),
                 quality_flags=payload_flags(content), eligible=False,
             ))
-    return ResponseBundle(case=case, response_text=text, context=context, todo=todo, calls=calls,
+    return ResponseBundle(case=case, response_text=text, response_raw=raw_response, context=context, todo=todo, calls=calls,
                           evidence=evidence, warnings=warnings,
                           data_sha256=digest({"case": case.model_dump(mode="json", exclude={"replay_path"}), "files": hashes}))

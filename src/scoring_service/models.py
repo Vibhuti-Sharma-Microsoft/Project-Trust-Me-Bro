@@ -143,6 +143,7 @@ class CorpusManifest(Contract):
 class ResponseBundle(Contract):
     case: CaseSpec
     response_text: str
+    response_raw: str | None = None
     context: str
     todo: TodoPlan | None
     calls: list[ToolCall]
@@ -206,6 +207,14 @@ class JudgeRecord(Contract):
     output: dict[str, Any]
 
 
+class EvaluationInput(Contract):
+    stage: Stage
+    step_id: str | None = None
+    payload: dict[str, Any]
+    status: Literal["NOT_COMPLETED", "VALIDATED", "FAILED"] = "NOT_COMPLETED"
+    error: str | None = None
+
+
 class StepResult(Contract):
     id: str
     title: str
@@ -233,14 +242,19 @@ class CaseResult(Contract):
     score: float | None
     cutoff: str
     response_text: str = ""
+    response_raw: str | None = None
+    case_metadata: CaseSpec | None = None
+    context: str | None = None
     todo: TodoPlan | None = None
     gate_votes: dict[str, GateVote] = Field(default_factory=dict)
     claims: list[Claim] = Field(default_factory=list)
+    bindings: list[StepBinding] = Field(default_factory=list)
     steps: list[StepResult] = Field(default_factory=list)
     calls: list[ToolCall] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     documents: list[DocumentEvidence] = Field(default_factory=list)
     judges: list[JudgeRecord] = Field(default_factory=list)
+    evaluation_inputs: list[EvaluationInput] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     error: str | None = None
     data_sha256: str = ""
