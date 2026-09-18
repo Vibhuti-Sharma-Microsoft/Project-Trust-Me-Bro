@@ -1,0 +1,22 @@
+{
+  "policy_version": "poc-v1",
+  "weights": {"faithfulness": 35, "coverage": 35, "source_trust": 20, "freshness": 10},
+  "fresh_days": 365,
+  "partial_days": 1095,
+  "allowed_document_hosts": [],
+  "trust_rules": [],
+  "models": {
+    "gpt": {
+      "model": "CONFIGURE_APPROVED_GPT_MODEL",
+      "approved_for_incident_data": false
+    },
+    "claude": {
+      "model": "CONFIGURE_APPROVED_CLAUDE_MODEL",
+      "approved_for_incident_data": false
+    },
+    "gemini": {
+      "model": "CONFIGURE_APPROVED_GEMINI_MODEL",
+      "approved_for_incident_data": false
+    }
+  }
+}

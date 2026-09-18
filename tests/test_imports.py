@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from sre_assurance.imports import ImportFailure, load_table, safe_path, write_json
-from sre_assurance.models import StepJudgment
-from sre_assurance.time_utils import timestamp_ns
+from scoring_service.imports import ImportFailure, load_table, safe_path, write_json
+from scoring_service.models import StepJudgment
+from scoring_service.time_utils import timestamp_ns
 
 
 @pytest.mark.parametrize("value", [True, "0.5", 0.75, -1, float("nan"), float("inf"), 10**400])
@@ -88,7 +88,7 @@ def test_extra_csv_cells_fail_explicitly(tmp_path):
 
 
 def test_duplicate_real_incidents_are_rejected(corpus):
-    from sre_assurance.models import CorpusManifest
+    from scoring_service.models import CorpusManifest
     _, manifest, _ = corpus
     a = manifest.cases[0].model_copy(update={"synthetic": False})
     b = a.model_copy(update={"id": "second-case", "message_id": "other-message"})

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Scoring Service{% if cases %} | Incident {{ cases[0].incident_id }}{% endif %}</title>
+  <link rel="stylesheet" href="report.css">
+  <script src="report.js" defer></script>
+</head>
+<body>
+{% macro scorecard(case, key) -%}
+<article class="scorecard" data-case-key="{{ key }}" aria-labelledby="incident-title">
+  <header class="card-header">
+    <div>
+      <p class="eyebrow">Incident scorecard{% if case.synthetic %} / Synthetic{% endif %}</p>
+      <h2 id="incident-title">Incident {{ case.incident_id }}</h2>
+      <p class="identity">First diagnostic message {{ case.message_id }} / {{ case.case_id }}</p>
+    </div>
+    <span class="badge status-{{ case.status | lower }}" data-status>{{ case.status }}</span>
+  </header>
+  <div class="total">
+    <p class="eyebrow">Recorded incident score</p>
+    <p><strong data-score="total">{{ case.score | number }}</strong>{% if case.score is not none %}<span class="scale"> / 100</span>{% endif %}</p>
+    {% if case.status_note %}<p class="status-note">{{ case.status_note }}</p>{% endif %}
+  </div>
+  <h3 class="dimensions-heading">Dimension contributions</h3>
+  <div class="dimensions" aria-label="Dimension contributions">
+    {% for dimension in case.dimensions %}
+    <button type="button" class="dimension" data-dimension="{{ dimension.key }}" aria-haspopup="dialog" aria-controls="dimension-dialog" aria-expanded="false">
+      <span class="dimension-name">{{ dimension.name }}</span>
+      <strong data-contribution="{{ dimension.key }}">{{ dimension.label }}{% if dimension.points is not none %}<span class="unit"> pt</span>{% endif %}</strong>
+      <span class="weight" data-weight="{{ dimension.key }}">Weight {{ dimension.weight }}% / up to {{ dimension.weight }} pt</span>
+      {% if dimension.neutral_count and dimension.points is not none %}<span class="neutral">Includes no-doc neutral convention; not verified freshness</span>{% endif %}
+      <span class="tile-action">{{ 'How calculated' if dimension.points is not none else 'Why not computed' if dimension.label == 'Not computed' else 'Review details' }}</span>
+    </button>
+    {% endfor %}
+  </div>
+  {% if case.consistency_state != 'match' %}<p class="consistency" data-consistency="{{ case.consistency_state }}">{{ case.consistency }}</p>{% endif %}
+  {% for dimension in case.dimensions %}
+  <template data-dimension-detail="{{ dimension.key }}">
+    <p id="dimension-definition" class="definition">{{ dimension.definition }}</p>
+    <h3>Calculation</h3>
+    <p class="calculation">{{ dimension.calculation }}</p>
+    {% if case.status == 'SCORED' %}
+    {% if dimension.distribution %}<p class="distribution">{{ dimension.distribution }}</p>{% endif %}
+    {% for note in dimension.notes %}<p class="detail-note">{{ note }}</p>{% endfor %}
+    <h3>{{ 'Explanation' if case.consistency_state == 'match' else 'Recorded step notes for review' }}</h3>
+    {% if dimension.reasons %}
+    <ul class="reasons">{% for reason in dimension.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    {% else %}<p class="muted">No explanation recorded.</p>{% endif %}
+    {% if case.consistency_state != 'match' %}<p class="muted fine-print">These step records do not establish a verified incident contribution breakdown.</p>{% endif %}
+    {% else %}<p class="detail-note">{{ case.status_note }}</p>{% endif %}
+  </template>
+  {% endfor %}
+</article>
+{%- endmacro %}
+<main>
+  <header class="page-header">
+    <p class="eyebrow">Local evidence review</p>
+    <h1>Scoring Service</h1>
+    <p class="muted">Uncalibrated evidence index, not a probability of correctness.</p>
+  </header>
+  {% if cases %}
+  <div class="selector">
+    <label for="incident-select">Select incident</label>
+    <select id="incident-select" aria-describedby="corpus-note">
+      {% for case in cases %}<option value="case-{{ loop.index0 }}">Incident {{ case.incident_id }} / {{ case.case_id }}{% if case.synthetic %} [Synthetic]{% endif %} / {{ case.status }}</option>{% endfor %}
+    </select>
+  </div>
+  <p id="corpus-note" class="muted fine-print">{% if has_synthetic %}{{ 'Includes synthetic data.' if real_count else 'Synthetic data.' }} {% endif %}{{ real_count }}/{{ target_real_cases }} real cases.</p>
+  <div id="scorecard-host">{{ scorecard(cases[0], 'case-0') }}</div>
+  {% for case in cases %}<template data-case-template="case-{{ loop.index0 }}">{{ scorecard(case, 'case-' ~ loop.index0) }}</template>{% endfor %}
+  <p id="selection-status" class="sr-only" role="status" aria-live="polite"></p>
+  <noscript><p class="notice">Enable local JavaScript to switch incidents and open dimension explanations. Only the first incident is shown without JavaScript.</p></noscript>
+  {% else %}<p class="empty">No incident results available.</p>{% endif %}
+  {% if runtime_log_name %}<p class="log-guidance muted fine-print">Detailed diagnostics: open <code>{{ runtime_log_name }}</code> locally. Runtime logs and results.json are not served.</p>{% endif %}
+</main>
+<dialog id="dimension-dialog" aria-labelledby="dimension-title" aria-describedby="dimension-definition">
+  <header class="dialog-header">
+    <div><p id="dialog-incident" class="eyebrow"></p><h2 id="dimension-title"></h2></div>
+    <button type="button" id="close-dimension" aria-label="Close dimension details">Close</button>
+  </header>
+  <div id="dimension-content"></div>
+</dialog>
+</body>
+</html>

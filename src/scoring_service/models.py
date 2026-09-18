@@ -88,6 +88,7 @@ class ToolCall(Contract):
 class TodoStep(Contract):
     id: str
     title: str = Field(min_length=1)
+    description: str = ""
     kind: Literal["evidence", "housekeeping", "conditional"] = "evidence"
     condition: str = ""
 
@@ -201,7 +202,7 @@ class JudgeRecord(Contract):
     model: str
     request_sha256: str
     prompt_sha256: str
-    mode: Literal["live", "replay", "cache"]
+    mode: Literal["live", "copilot", "replay", "cache"]
     output: dict[str, Any]
 
 
@@ -257,3 +258,4 @@ class BatchResult(Contract):
     target_real_cases: int
     selected_real_cases: int
     results: list[CaseResult]
+    runtime_log_file: str | None = None

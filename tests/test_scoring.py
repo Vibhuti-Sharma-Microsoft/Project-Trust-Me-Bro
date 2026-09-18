@@ -1,10 +1,17 @@
+import json
 from itertools import product
 
 import pytest
 
-from sre_assurance.config import EvaluationConfig
-from sre_assurance.models import ClaimSupport, DocumentEvidence, GateVote, StepJudgment, StepResult
-from sre_assurance.scoring import coverage, document_freshness, faithfulness, gate_decision, response_score, step_score
+from scoring_service.config import EvaluationConfig
+from scoring_service.models import (
+    ClaimSupport, DocumentEvidence, EvidenceItem, EvidenceRef, GateVote,
+    StepJudgment, StepResult,
+)
+from scoring_service.scoring import (
+    coverage, document_freshness, faithfulness, gate_decision, response_score,
+    step_score, validate_references,
+)
 
 
 def test_all_gate_vote_combinations():
@@ -62,6 +69,59 @@ def test_no_docs_is_not_missing_docs():
     assert document_freshness([], "2026-09-16T00:00:00Z", config)[0] == 1
     doc = DocumentEvidence(id="doc", url="https://docs.example.test", step_id="step-1", status="AUTH_REQUIRED")
     assert document_freshness([doc], "2026-09-16T00:00:00Z", config)[0] == 0
+
+
+def test_validate_references_accepts_exact_decoded_json_string():
+    evidence = [EvidenceItem(
+        id="e1",
+        source_kind="incident",
+        origin="icm:1",
+        content='{"title":"Refresh token after \\"expired\\" response"}',
+    )]
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='Refresh token after "expired" response')
+    ], evidence)
+    with pytest.raises(ValueError, match="absent"):
+        validate_references([
+            EvidenceRef(evidence_id="e1", quote="Refresh token after expired response")
+        ], evidence)
+    evidence[0].content = (
+        '[{"title":"Refresh token after \\"expired\\" response","status":"Open"}, ...'
+    )
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='Refresh token after "expired" response')
+    ], evidence)
+    evidence[0].content = json.dumps(json.dumps({
+        "title": 'Refresh token after "expired" response',
+        "impact": None,
+    }))
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='"impact": null')
+    ], evidence)
+    evidence[0].content = '"{\\n  \\"impact\\": null,\\n  \\"title\\": \\"partial'
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='"impact": null')
+    ], evidence)
+    evidence[0].quality_flags = ["POSSIBLY_SHORTENED"]
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='"quality_flags": ["POSSIBLY_SHORTENED"]')
+    ], evidence)
+    evidence[0].content = '"{\\n  \\"created\\": \\"2026-09-16T00:49:48Z\\",\\n  \\"broken\\...'
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='"created": "2026-09-16T00:49:48Z"')
+    ], evidence)
+    evidence[0].content = json.dumps([{"id": 1, "title": "Related incident"}], indent=2)
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='"id": 1,\\n    "title": "Related incident"')
+    ], evidence)
+    evidence[0].content = 'Message: Partner: \\"PureStorage\\", Regions: 11'
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote='Partner: "PureStorage", Regions: 11')
+    ], evidence)
+    evidence[0].query = 'Events | where Timestamp > ago(2h)'
+    validate_references([
+        EvidenceRef(evidence_id="e1", quote="where Timestamp > ago(2h)")
+    ], evidence)
 
 
 def test_v1_freshness_bands_cannot_be_silently_replaced():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import inspect
+import math
 import os
 import queue
 import socket
@@ -12,27 +13,15 @@ from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlsplit
 
 import pytest
 from markupsafe import Markup
 
-from sre_assurance import report
-from sre_assurance.config import EvaluationConfig
-from sre_assurance.models import (
-    BatchResult,
-    CaseResult,
-    Claim,
-    ClaimSupport,
-    DocumentEvidence,
-    EvidenceItem,
-    EvidenceRef,
-    GateVote,
-    JudgeRecord,
-    StepResult,
-    TodoPlan,
-    TodoStep,
-    ToolCall,
+from scoring_service import report
+from scoring_service.config import EvaluationConfig
+from scoring_service.models import (
+    BatchResult, CaseResult, Claim, ClaimSupport, DocumentEvidence, EvidenceItem,
+    EvidenceRef, GateVote, JudgeRecord, StepResult, TodoPlan, TodoStep, ToolCall,
 )
 
 
@@ -46,19 +35,27 @@ class _Node:
     def text(self) -> str:
         return "".join(child.text if isinstance(child, _Node) else child for child in self.children)
 
+    def find(self, tag: str, **attrs: str) -> _Node:
+        return next(node for node in self.walk() if node.tag == tag and all(node.attrs.get(k) == v for k, v in attrs.items()))
+
+    def walk(self) -> Iterator[_Node]:
+        yield self
+        for child in self.children:
+            if isinstance(child, _Node):
+                yield from child.walk()
+
 
 class _Page(HTMLParser):
     def __init__(self, html: str) -> None:
         super().__init__(convert_charrefs=True)
-        self.nodes: list[_Node] = []
-        self.stack = [_Node("root")]
+        self.root = _Node("root")
+        self.stack = [self.root]
         self.feed(html)
         self.close()
         assert len(self.stack) == 1, "Unclosed HTML elements"
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         node = _Node(tag, dict(attrs))
-        self.nodes.append(node)
         self.stack[-1].children.append(node)
         if tag not in {"meta", "link", "br", "hr", "img", "input"}:
             self.stack.append(node)
@@ -71,24 +68,40 @@ class _Page(HTMLParser):
         self.stack[-1].children.append(data)
 
     def find(self, tag: str, **attrs: str) -> _Node:
-        return next(node for node in self.nodes if node.tag == tag and all(node.attrs.get(k) == v for k, v in attrs.items()))
+        return self.root.find(tag, **attrs)
+
+    @property
+    def nodes(self) -> list[_Node]:
+        return list(self.root.walk())
 
     @property
     def text(self) -> str:
-        return self.stack[0].text
+        return self.root.text
+
+
+def _scored_step(
+    step_id: str = "step-1",
+    values: tuple[float, float, float, float] = (1, 1, 0.5, 1),
+    weights: dict[str, int] | None = None,
+    **changes: Any,
+) -> StepResult:
+    weights = weights if weights is not None else EvaluationConfig().weights
+    keys = ("faithfulness", "coverage", "source_trust", "freshness")
+    fields: dict[str, Any] = {
+        "id": step_id, "title": "Check evidence", "disposition": "EVALUATE", "included": True,
+        "score": sum(weights[key] * value for key, value in zip(keys, values)),
+        **dict(zip(keys, values)),
+    }
+    fields.update(changes)
+    return StepResult(**fields)
 
 
 def _case(**changes: Any) -> CaseResult:
     fields: dict[str, Any] = {
-        "case_id": "case-1",
-        "incident_id": "incident-123",
-        "message_id": "message-456",
-        "synthetic": False,
-        "status": "SCORED",
-        "score": 75.0,
-        "cutoff": "2026-09-17T09:00:00Z",
-        "response_text": "The first diagnostic response.",
-        "data_sha256": "case-data-hash",
+        "case_id": "case-1", "incident_id": "incident-123", "message_id": "message-456",
+        "synthetic": False, "status": "SCORED", "score": 90.0, "cutoff": "2026-09-17T09:00:00Z",
+        "steps": [_scored_step()],
+        "response_text": "The first diagnostic response.", "data_sha256": "case-data-hash",
         "policy_sha256": "case-policy-hash",
     }
     fields.update(changes)
@@ -97,13 +110,9 @@ def _case(**changes: Any) -> CaseResult:
 
 def _batch(*cases: CaseResult, **changes: Any) -> BatchResult:
     fields: dict[str, Any] = {
-        "run_id": "run-local",
-        "created_at": "2026-09-17T10:00:00Z",
-        "policy_version": "custom-policy",
-        "policy_sha256": "batch-policy-hash",
-        "target_real_cases": 10,
-        "selected_real_cases": 999,
-        "results": list(cases),
+        "run_id": "run-local", "created_at": "2026-09-17T10:00:00Z",
+        "policy_version": "custom-policy", "policy_sha256": "batch-policy-hash",
+        "target_real_cases": 10, "selected_real_cases": 999, "results": list(cases),
     }
     fields.update(changes)
     return BatchResult(**fields)
@@ -114,25 +123,54 @@ def _render(tmp_path: Path, *cases: CaseResult, **changes: Any) -> tuple[Path, _
     return path, _Page(path.read_text(encoding="utf-8"))
 
 
-def test_public_api_and_local_assets(tmp_path: Path) -> None:
+def _raw_case(sentinel: str) -> CaseResult:
+    return _case(
+        response_text=sentinel, error=sentinel, limitations=[sentinel], data_sha256=sentinel, policy_sha256=sentinel,
+        todo=TodoPlan(source_call_id=sentinel, created_at=sentinel, raw=sentinel,
+                      steps=[TodoStep(id=sentinel, title=sentinel, condition=sentinel)]),
+        claims=[Claim(id=sentinel, quote=sentinel, step_id="step-1", claim_type="observation")],
+        calls=[ToolCall(id=sentinel, name=sentinel, thread_id=sentinel, trace_id=sentinel,
+                        input={"context": sentinel}, input_raw=sentinel, output_raw=sentinel)],
+        evidence=[EvidenceItem(id=sentinel, source_kind=sentinel, origin=sentinel, query=sentinel,
+                               content=sentinel, source_record_id=sentinel)],
+        documents=[DocumentEvidence(id=sentinel, url=sentinel, step_id="step-1", status="AVAILABLE",
+                                    content=sentinel, content_sha256=sentinel, version=sentinel, metadata_provenance=sentinel)],
+        judges=[JudgeRecord(role="gpt", stage="step", step_id="step-1", model=sentinel, request_sha256=sentinel,
+                            prompt_sha256=sentinel, mode="replay",
+                            output={"rationale": "Observed signals support the response.", "full_context": sentinel})],
+    )
+
+
+def test_public_api_and_only_local_ui_assets(tmp_path: Path) -> None:
     path, page = _render(tmp_path, _case())
     assert path == tmp_path / "reports" / "index.html"
-    assert {item.name for item in path.parent.iterdir()} == {"index.html", "report.css"}
+    assert {item.name for item in path.parent.iterdir()} == {"index.html", "report.css", "report.js"}
     css = path.with_name("report.css").read_text(encoding="utf-8")
-    assert "details" in css and "@media" in css and "focus-visible" in css
+    js = path.with_name("report.js").read_text(encoding="utf-8")
+    assert "dialog" in css and "@media" in css and "focus-visible" in css
     assert "url(" not in css and "@import" not in css
+    assert "innerHTML" not in js and "eval(" not in js and "fetch(" not in js
+    assert "textContent" in js and "cloneNode" in js
     assert page.find("link", rel="stylesheet").attrs["href"] == "report.css"
-    assert not any(node.tag in {"script", "iframe", "img", "object", "embed"} for node in page.nodes)
+    scripts = [node for node in page.nodes if node.tag == "script"]
+    assert len(scripts) == 1 and scripts[0].attrs == {"src": "report.js", "defer": None}
+    assert not scripts[0].text
+    csp = page.find("meta", **{"http-equiv": "Content-Security-Policy"}).attrs["content"]
+    assert csp and "script-src 'self'" in csp and "unsafe-inline" not in csp
     assert "Uncalibrated evidence index" in page.text
-    for dimension, weight in {"faithfulness": 35, "coverage": 35, "source_trust": 20, "freshness": 10}.items():
-        assert page.find("dd", **{"data-weight": dimension}).text == f"{weight}%"
-    assert "Policy weights are not recorded" not in page.text
-    assert "Weights unavailable" not in page.text
-    assert "batch-policy-hash" in page.text and "case-policy-hash" in page.text
-    assert "case-data-hash" in page.text and "First diagnostic message ID" in page.text
-    assert "incident-123" in page.text and "message-456" in page.text
-    assert "report.css" not in report.render_report(_batch(), path.parent).read_text().split("<body>")[1]
-    assert "No case results" in path.read_text()
+    assert page.find("label", **{"for": "incident-select"}).text == "Select incident"
+    card = page.find("div", id="scorecard-host")
+    assert card.find("strong", **{"data-score": "total"}).text == "90.00"
+    assert len([node for node in card.walk() if node.tag == "button"]) == 4
+    assert card.find("h3", **{"class": "dimensions-heading"}).text == "Dimension contributions"
+    assert not any("data-consistency" in node.attrs for node in card.walk())
+    assert not any(node.attrs.get("class") == "status-note" for node in card.walk())
+    assert "before display rounding" not in page.text
+    assert "not an averaged tri-score" not in page.text
+    dialog = page.find("dialog", id="dimension-dialog")
+    assert dialog.attrs["aria-labelledby"] == "dimension-title"
+    assert dialog.attrs["aria-describedby"] == "dimension-definition"
+    assert page.find("button", id="close-dimension").attrs["aria-label"] == "Close dimension details"
     assert not list(path.parent.glob(".*"))
     signature = inspect.signature(report.serve_reports)
     assert tuple(signature.parameters) == ("directory", "host", "port")
@@ -141,289 +179,316 @@ def test_public_api_and_local_assets(tmp_path: Path) -> None:
     assert tuple(inspect.signature(report.render_report).parameters) == ("batch", "output_dir")
 
 
+def test_only_first_scorecard_is_outside_inert_templates(tmp_path: Path) -> None:
+    _, page = _render(tmp_path, _case(), _case(case_id="second", incident_id="other", synthetic=True))
+    host = page.find("div", id="scorecard-host")
+    assert len([child for child in host.children if isinstance(child, _Node) and child.tag == "article"]) == 1
+    assert host.find("h2", id="incident-title").text == "Incident incident-123"
+    selector = page.find("select", id="incident-select")
+    options = [child for child in selector.children if isinstance(child, _Node)]
+    assert [option.attrs["value"] for option in options] == ["case-0", "case-1"]
+    assert "[Synthetic]" in options[1].text
+    assert page.find("template", **{"data-case-template": "case-1"}).find("h2").text == "Incident other"
+
+
 @pytest.mark.parametrize(
-    "weights",
+    ("weights", "expected"),
     [
-        {"faithfulness": 35, "coverage": 35, "source_trust": 20, "freshness": 10},
-        {"freshness": 5, "source_trust": 15, "coverage": 40, "faithfulness": 40},
+        ({"faithfulness": 35, "coverage": 35, "source_trust": 20, "freshness": 10}, [14, 10.5, 6, 5]),
+        ({"freshness": 5, "source_trust": 15, "coverage": 40, "faithfulness": 40}, [16, 12, 4.5, 2.5]),
     ],
     ids=["default-policy", "alternate-policy"],
 )
-def test_actual_policy_weights_in_summary_formula_and_steps(tmp_path: Path, weights: dict[str, int]) -> None:
+def test_weighted_points_retain_structural_denominator(
+    tmp_path: Path, weights: dict[str, int], expected: list[float],
+) -> None:
     config = EvaluationConfig(weights=weights)
-    score = weights["faithfulness"] + 0.5 * weights["coverage"] + weights["freshness"]
     steps = [
-        StepResult(id="weighted", title="Evidence", disposition="EVALUATE", included=True,
-                   faithfulness=1, coverage=0.5, source_trust=0, freshness=1, score=score),
-        StepResult(id="zero", title="Unsupported", disposition="EVALUATE", included=True,
-                   faithfulness=0, coverage=0, source_trust=0, freshness=0, score=0),
-        StepResult(id="excluded", title="Housekeeping", disposition="HOUSEKEEPING", included=False),
+        _scored_step("a", (1, 0.5, 0.5, 1), weights),
+        _scored_step("b", (0.5, 1, 1, 0.5), weights),
+        _scored_step("c", (0.5, 0, 0, 1), weights),
+        StepResult(id="missing", title="Missing work", disposition="MISSING_REQUIRED", included=True, score=0),
+        StepResult(id="unassigned", title="Unassigned", disposition="UNASSIGNED", included=True, score=0),
+        _scored_step("excluded", (1, 1, 1, 1), weights, included=False, disposition="HOUSEKEEPING"),
     ]
-    _, page = _render(tmp_path, _case(steps=steps, score=score / 2), weights=config.weights)
-    summary = page.find("section", **{"aria-labelledby": "batch-heading"})
-    weight_list = page.find("dl", **{"aria-label": "Policy dimension weights"})
-    assert weight_list in summary.children
-    caption = page.find("caption").text
-    for key, abbreviation, label in (
-        ("faithfulness", "F", "faithfulness"), ("coverage", "C", "coverage"),
-        ("source_trust", "T", "source trust"), ("freshness", "P", "freshness"),
+    case = _case(steps=steps, score=sum(expected))
+    before = case.model_dump_json()
+    view = report._case_view(case, config.weights)
+    assert [dimension["points"] for dimension in view["dimensions"]] == expected
+    assert view["consistency_state"] == "match"
+    assert all(dimension["included_count"] == 5 and dimension["structural_count"] == 2 for dimension in view["dimensions"])
+    assert all(dimension["missing_count"] == 0 for dimension in view["dimensions"])
+    _, page = _render(tmp_path, case, weights=config.weights)
+    card = page.find("div", id="scorecard-host")
+    for dimension, points in zip(view["dimensions"], expected):
+        key = dimension["key"]
+        tile = card.find("button", **{"data-dimension": key})
+        assert tile.find("strong").text == f"{points:.2f} pt"
+        assert f"Weight {weights[key]}%" in tile.text
+        detail = card.find("template", **{"data-dimension-detail": key})
+        assert "/ 5 included steps" in detail.text
+        assert "3 contributing steps; 1 excluded step." in detail.text
+        assert "2 required/unassigned steps add no points but remain included." in detail.text
+    assert case.model_dump_json() == before
+    assert "Mismatch" not in card.text
+
+
+def test_zero_is_judged_zero_but_missing_scores_are_not(tmp_path: Path) -> None:
+    zero = _case(steps=[_scored_step(values=(0, 0, 0, 0))], score=0)
+    _, page = _render(tmp_path, zero)
+    host = page.find("div", id="scorecard-host")
+    assert host.find("strong", **{"data-score": "total"}).text == "0.00"
+    assert "1 contributing step." in host.text
+    assert "0 at 0.5" not in host.text and "0 at 1" not in host.text
+    assert host.find("strong", **{"data-contribution": "faithfulness"}).text == "0.00 pt"
+    for step in (
+        _scored_step(score=None),
+        _scored_step(faithfulness=None),
+        StepResult(id="missing", title="Missing", disposition="MISSING_REQUIRED", included=True, score=None),
     ):
-        assert page.find("dd", **{"data-weight": key}).text == f"{weights[key]}%"
-        assert f"{abbreviation}: {label} ({weights[key]}%)" in caption
-    formula = (
-        f"Step index = F x {weights['faithfulness']} + C x {weights['coverage']} "
-        f"+ T x {weights['source_trust']} + P x {weights['freshness']}."
-    )
-    assert formula in page.text
-    assert "Policy weights are not recorded" not in page.text
-    assert "Weights unavailable" not in page.text
-    if weights["faithfulness"] != 35:
-        assert "35%" not in page.text
-    row = page.find("tr", **{"data-step-id": "weighted"})
-    assert f"{score:.2f}" in row.text and f"{score / 2:.2f}" in row.text
-    assert "/ 2 included steps" in row.text
-    excluded = page.find("tr", **{"data-step-id": "excluded"}).text
-    assert "Unavailable" in excluded and "Excluded - no contribution" in excluded
-    assert page.find("strong", **{"data-metric": "mean-score"}).text == f"{score / 2:.2f}"
+        view = report._case_view(_case(steps=[step]), EvaluationConfig().weights)
+        assert view["dimensions"][0]["points"] is None
+        assert view["dimensions"][0]["label"] == "Unavailable"
+        assert "Missing scores are not zero" in view["dimensions"][0]["calculation"]
+        assert view["consistency_state"] == "unavailable"
 
 
-def test_actual_counts_statuses_and_null_scores(tmp_path: Path) -> None:
-    statuses = ["SCORED", "SCORED", "SCORED", "GATE_FAILED", "UNSCORABLE", "JUDGE_ERROR", "IMPORT_ERROR", "NOT_APPLICABLE"]
-    scores = [80.0, 0.0, None, None, None, None, None, None]
-    cases = [
-        _case(case_id=f"case-{i}", status=status, score=score, synthetic=i >= 5)
-        for i, (status, score) in enumerate(zip(statuses, scores))
-    ]
-    _, page = _render(tmp_path, *cases)
-    assert page.find("strong", **{"data-metric": "real-count"}).text == "5"
-    assert page.find("strong", **{"data-metric": "synthetic-count"}).text == "3"
-    assert page.find("strong", **{"data-metric": "mean-score"}).text == "40.00"
-    assert "2 available scores" in page.text
-    assert "Selection metadata and actual real case count differ" in page.text
-    for i, status in enumerate(statuses, start=1):
-        text = page.find("article", id=f"case-{i}").text
-        assert status in text
-        if i > 2:
-            assert "Reported index: Unavailable" in text
-            assert "Reported index: 0.00" not in text
-    gate_details = next(
-        node for node in page.nodes
-        if node.tag == "details" and "Todo gate model votes" in node.text and node.attrs.get("open") is None and "open" in node.attrs
-    )
-    assert "Missing votes are not passes" in gate_details.text
-
-
-@pytest.mark.parametrize("selected", [0, 1, 10, 12])
-def test_synthetic_selection_note_is_visible_and_counts_are_independent(tmp_path: Path, selected: int) -> None:
-    _, page = _render(
-        tmp_path,
-        _case(case_id="real", score=None),
-        _case(case_id="synthetic", synthetic=True, score=None),
-        selected_real_cases=selected,
-        target_real_cases=10,
-    )
-    note = page.find("p", id="input-selection-note")
-    summary = page.find("section", **{"aria-labelledby": "batch-heading"})
-    assert note in summary.children
-    assert "Input cases labeled synthetic are shown separately" in note.text
-    assert "do not count toward the real-case target" in note.text
-    assert f"Selected real cases: {selected} / target real cases: 10." in note.text
-    assert ("The real-case selection is below target." in note.text) == (selected < 10)
-    assert page.find("strong", **{"data-metric": "real-count"}).text == "1"
-    assert page.find("strong", **{"data-metric": "synthetic-count"}).text == "1"
-    assert page.find("strong", **{"data-metric": "mean-score"}).text == "Unavailable"
-    assert "0 available scores" in page.text
-    assert "Synthetic case" in page.find("article", id="case-2").text
-    assert "Null scores are unavailable, never zero" in page.text
-
-
-def test_renderer_preserves_cli_owned_results_json(tmp_path: Path) -> None:
-    output = tmp_path / "reports"
-    output.mkdir()
-    results = output / "results.json"
-    original = b'{"results":[{"score":null}]}'
-    results.write_bytes(original)
-    report.render_report(_batch(_case(score=None)), output)
-    assert results.read_bytes() == original
-    assert {item.name for item in output.iterdir()} == {"index.html", "report.css", "results.json"}
-
-
-@pytest.mark.parametrize("status", ["GATE_FAILED", "UNSCORABLE", "JUDGE_ERROR", "IMPORT_ERROR", "NOT_APPLICABLE"])
-def test_non_scored_values_never_enter_mean(tmp_path: Path, status: str) -> None:
-    _, page = _render(tmp_path, _case(status=status, score=100.0))
-    assert page.find("strong", **{"data-metric": "mean-score"}).text == "Unavailable"
-    assert "Reported index: 100.00" in page.text
-    assert "not a scored success" in page.text
-
-
-def test_included_excluded_missing_and_zero_step_scores(tmp_path: Path) -> None:
+def test_consistency_uses_unrounded_points_and_never_changes_scores(tmp_path: Path) -> None:
     steps = [
-        StepResult(id="first", title="Observe", disposition="EVALUATE", included=True,
-                   faithfulness=1, coverage=0.5, source_trust=0, freshness=1, score=90,
-                   votes={"gpt": 1, "claude": 0.5, "gemini": 0},
-                   freshness_reason="No documentation used", limitations=["Missing logs"]),
-        StepResult(id="missing", title="Missing", disposition="MISSING_REQUIRED", included=True),
-        StepResult(id="zero", title="Unsupported", disposition="EVALUATE", included=True,
-                   faithfulness=0, coverage=0, source_trust=0, freshness=0, score=0,
-                   votes={"gpt": 0.5, "claude": 0.5, "gemini": 0.5}),
-        StepResult(id="house", title="Tidy", disposition="HOUSEKEEPING", included=False, score=99),
-        StepResult(id="conditional", title="Inactive condition", disposition="NOT_APPLICABLE", included=False),
+        _scored_step(values=(1, 1, 1, 1)),
+        StepResult(id="m", title="Missing", included=True, disposition="MISSING_REQUIRED", score=0),
+        StepResult(id="u", title="Unassigned", included=True, disposition="UNASSIGNED", score=0),
     ]
-    _, page = _render(tmp_path, _case(steps=steps))
-    first = page.find("tr", **{"data-step-id": "first"})
-    cells = [child for child in first.children if isinstance(child, _Node) and child.tag == "td"]
-    assert [cell.text for cell in cells[2:5]] == ["1.0", "0.5", "0.0"]
-    assert "30.00" in cells[-1].text and "/ 3 included steps" in cells[-1].text
-    assert "Neutral convention; no docs, not verified freshness" in cells[5].text
-    missing = page.find("tr", **{"data-step-id": "missing"}).text
-    assert missing.count("Unavailable") == 6 and "0.00" not in missing
-    zero = page.find("tr", **{"data-step-id": "zero"}).text
-    assert zero.count("0.00") == 2
-    for name in ("house", "conditional"):
-        row = page.find("tr", **{"data-step-id": name}).text
-        assert "No - excluded" in row and "Excluded - no contribution" in row
-    first_details = page.find("details", id="case-1-step-1")
-    assert "Model disagreement" in first_details.text and "Missing logs" in first_details.text
-    votes = next(child for child in first_details.children if isinstance(child, _Node) and child.tag == "dl" and child.attrs.get("class") == "vote-list")
-    assert "gpt1.0" in votes.text and "claude0.5" in votes.text and "gemini0.0" in votes.text
-    assert "Recorded model votes agree" in page.find("details", id="case-1-step-3").text
-    assert "no agreement can be inferred" in page.find("details", id="case-1-step-2").text
-
-
-def test_full_audit_content_and_document_freshness(tmp_path: Path) -> None:
-    ref = EvidenceRef(evidence_id="ev-1", quote="Supporting log quote")
-    case = _case(
-        todo=TodoPlan(source_call_id="todo-call", created_at="todo-created", raw="Original todo",
-                      steps=[TodoStep(id="step-1", title="Check logs", kind="conditional", condition="If failing")]),
-        gate_votes={
-            "gpt": GateVote(decision="PASS", rationale="Complete plan", references=[ref]),
-            "claude": GateVote(decision="FAIL", rationale="Missing an investigation"),
-            "gemini": GateVote(decision="INSUFFICIENT_EVIDENCE", rationale="No context"),
-        },
-        claims=[Claim(id="claim-1", quote="Response claim", step_id="step-1", claim_type="conclusion")],
-        steps=[StepResult(id="step-1", title="Check logs", disposition="EVALUATE", included=True,
-                          freshness=1, score=50, call_ids=["call-1"], claim_ids=["claim-1"],
-                          support=[ClaimSupport(claim_id="claim-1", verdict="PARTIAL", references=[ref], rationale="Only partial")])],
-        calls=[ToolCall(id="call-1", name="query_logs", thread_id="thread-1", trace_id="trace-1", status="CONFLICT",
-                        started_at="start-time", completed_at="end-time", start_record_ids=["start-row"],
-                        end_record_ids=["end-row"], input={"table": "selected-table"}, input_raw="raw selector",
-                        output_raw="raw log output", quality_flags=["conflicting outputs"])],
-        evidence=[EvidenceItem(id="ev-1", source_kind="Kusto", origin="https://logs.example.test/query",
-                               content="complete evidence text", source_record_id="evidence-row", call_id="call-1",
-                               observed_at="observed-time", completed_at="completed-time", query="Table | take 1",
-                               quality_flags=["missing source details"], eligible=False)],
-        documents=[
-            DocumentEvidence(id="doc-1", url="https://docs.example.test/runbook", step_id="step-1", status="AVAILABLE",
-                             content="Runbook text", content_sha256="document-content-hash", last_updated="2025-01-02",
-                             retrieved_at="2026-09-16", version="version-42", historical_version_verified=False,
-                             metadata_provenance="lastupdated header", reason="Historical snapshot not verified"),
-            DocumentEvidence(id="doc-missing", url="https://docs.example.test/missing", step_id="step-1",
-                             status="MISSING", reason="No approved snapshot available"),
-        ],
-        judges=[JudgeRecord(role="gpt", stage="step", step_id="step-1", model="approved-model",
-                            request_sha256="request-hash", prompt_sha256="prompt-hash", mode="cache",
-                            output={"rationale": "Model explanation", "source_trust": 0.5})],
-        limitations=["Only one diagnostic response"], error="Recorded audit diagnostic",
-    )
-    _, page = _render(tmp_path, case)
-    for expected in (
-        "Original todo", "todo-call", "todo-created", "If failing", "Complete plan", "Missing an investigation",
-        "INSUFFICIENT_EVIDENCE", "recorded gate decisions differ", "Supporting log quote", "Response claim",
-        "PARTIAL", "Only partial", "thread-1", "trace-1", "start-row", "end-row", "selected-table",
-        "raw selector", "raw log output", "CONFLICT", "conflicting outputs", "evidence-row", "Table | take 1",
-        "complete evidence text", "Ineligible", "observed-time", "completed-time", "missing source details",
-        "AVAILABLE", "Runbook text", "document-content-hash", "2025-01-02", "2026-09-16", "version-42",
-        "Cache version", "Not recorded in batch schema", "lastupdated header", "Historical snapshot not verified",
-        "Unknown - not verified", "No approved snapshot available", "request-hash", "prompt-hash",
-        "approved-model", "cache", "Model explanation", "Only one diagnostic response", "Recorded audit diagnostic",
-    ):
-        assert expected in page.text
-    assert "Neutral convention" not in page.find("tr", **{"data-step-id": "step-1"}).text
-    for node in page.nodes:
-        if node.tag == "a" and node.attrs.get("target") == "_blank":
-            assert node.attrs["rel"] == "noopener noreferrer"
-
-
-def test_all_untrusted_content_is_text_not_html(tmp_path: Path) -> None:
-    attack = '<script>alert("incident")</script><img src=x onerror="alert(1)"><svg/onload=alert(2)>'
-    ref = EvidenceRef(evidence_id=attack, quote=attack)
-    case = _case(
-        case_id=attack, incident_id=attack, message_id=attack, cutoff=attack, response_text=attack,
-        error=attack, policy_sha256=attack, data_sha256=attack, limitations=[attack],
-        todo=TodoPlan(source_call_id=attack, created_at=attack, raw=attack,
-                      steps=[TodoStep(id=attack, title=attack, condition=attack)]),
-        gate_votes={attack: GateVote(decision="FAIL", rationale=attack, references=[ref])},
-        claims=[Claim(id=attack, quote=attack, step_id=attack, claim_type="observation")],
-        steps=[StepResult(id=attack, title=attack, disposition=attack, included=True,
-                          freshness_reason=attack, limitations=[attack], call_ids=[attack], claim_ids=[attack],
-                          votes={attack: 0.5}, support=[ClaimSupport(claim_id=attack, verdict="UNSUPPORTED",
-                                                                  references=[ref], rationale=attack)])],
-        calls=[ToolCall(id=attack, name=attack, thread_id=attack, trace_id=attack, started_at=attack,
-                        completed_at=attack, start_record_ids=[attack], end_record_ids=[attack],
-                        input_raw=attack, output_raw=attack, input={"selector": attack}, quality_flags=[attack])],
-        evidence=[EvidenceItem(id=attack, source_kind=attack, origin=attack, content=attack, source_record_id=attack,
-                               call_id=attack, observed_at=attack, completed_at=attack, query=attack, quality_flags=[attack])],
-        documents=[DocumentEvidence(id=attack, url=attack, step_id=attack, status=attack, content=attack,
-                                    content_sha256=attack, last_updated=attack, retrieved_at=attack,
-                                    version=attack, metadata_provenance=attack, reason=attack)],
-        judges=[JudgeRecord(role="gpt", stage="step", model=attack, request_sha256=attack,
-                            prompt_sha256=attack, step_id=attack, mode="replay", output={"rationale": attack})],
-    )
-    path, page = _render(tmp_path, case, run_id=attack, created_at=attack, policy_version=attack, policy_sha256=attack)
-    html = path.read_text(encoding="utf-8")
-    assert attack not in html
-    assert "&lt;script&gt;" in html and "&lt;img" in html
-    assert attack in page.text
-    assert page.find("tr", **{"data-step-id": attack})
-    for node in page.nodes:
-        assert node.tag not in {"script", "img", "svg", "iframe", "object", "embed"}
-        assert not any(key.lower().startswith("on") for key in node.attrs)
-    assert "|safe" not in (Path(report.__file__).parent / "templates" / "report.html.j2").read_text()
-
-
-def test_html_marked_string_subclasses_are_still_untrusted(tmp_path: Path) -> None:
-    attack = '<svg onload="alert(1)">untrusted</svg>'
-    case = _case()
-    case.limitations.append(Markup(attack))
-    case.gate_votes[Markup(attack)] = GateVote(decision="FAIL", rationale="Missing plan")
-    step = StepResult(id="s", title="Step", included=True, disposition="EVALUATE")
-    step.limitations.append(Markup(attack))
-    case.steps.append(step)
-    _, page = _render(tmp_path, case)
-    assert attack in page.text
-    assert not any(node.tag == "svg" for node in page.nodes)
-    assert not any("onload" in node.attrs for node in page.nodes)
+    case = _case(steps=steps, score=100 / 3)
+    view = report._case_view(case, EvaluationConfig().weights)
+    assert math.isclose(sum(dimension["points"] for dimension in view["dimensions"]), case.score)
+    assert view["consistency_state"] == "match" and "before display rounding" in view["consistency"]
+    _, page = _render(tmp_path, _case(score=12.34))
+    card = page.find("div", id="scorecard-host")
+    assert card.find("strong", **{"data-score": "total"}).text == "12.34"
+    warning = card.find("p", **{"data-consistency": "mismatch"}).text
+    assert "Review required" in warning and "recorded incident score has not been changed" in warning
+    assert all(node.text == "Unavailable" for node in card.walk() if "data-contribution" in node.attrs)
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("case", "state"),
     [
-        "javascript:alert(1)", "JaVaScRiPt:alert(1)", "file:///C:/private.txt",
-        "data:text/html,<script>alert(1)</script>", "vbscript:alert(1)", "//evil.example/path",
-        " https://example.test", "https:\n//example.test", "https://example.test\\@evil.test",
-        "https://example.test:bad/path", "https://user:password@example.test", "https://",
-        "https://[bad-ip]/", "relative/path", "\x00https://example.test",
+        (_case(score=12.34), "mismatch"),
+        (_case(steps=[_scored_step(score=50)]), "mismatch"),
+        (_case(steps=[_scored_step("a", score=80), _scored_step("b", score=100)]), "mismatch"),
+        (_case(score=80, steps=[_scored_step(score=80)]), "mismatch"),
+        (_case(score=10, steps=[StepResult(id="m", title="Missing", disposition="MISSING_REQUIRED", included=True, score=10)]), "mismatch"),
+        (_case(steps=[_scored_step(coverage=None)]), "unavailable"),
     ],
+    ids=["total-mismatch", "step-total-mismatch", "cancelling-step-mismatches", "dimension-step-mismatch", "nonzero-structural", "incomplete-dimensions"],
 )
-def test_unsafe_source_urls_are_not_links(tmp_path: Path, url: str) -> None:
-    _, page = _render(
-        tmp_path,
-        _case(
-            evidence=[EvidenceItem(id="e", source_kind="source", origin=url, content="Text")],
-            documents=[DocumentEvidence(id="d", url=url, step_id="s", status="MISSING")],
-        ),
+def test_archived_breakdowns_withhold_all_unverified_contributions(tmp_path: Path, case: CaseResult, state: str) -> None:
+    original = case.model_dump_json()
+    view = report._case_view(case, EvaluationConfig().weights)
+    assert view["consistency_state"] == state
+    assert view["score"] == case.score
+    for dimension in view["dimensions"]:
+        assert dimension["points"] is None and dimension["label"] == "Unavailable"
+        assert "Review required" in dimension["calculation"]
+        assert " x " not in dimension["calculation"] and " = " not in dimension["calculation"]
+    path, page = _render(tmp_path, case)
+    assert all(node.text == "Unavailable" for node in page.nodes if "data-contribution" in node.attrs)
+    assert "Recorded step notes for review" in page.text
+    assert "verified incident contribution breakdown" in page.text
+    assert "35 x" not in path.read_text(encoding="utf-8")
+    assert case.model_dump_json() == original
+
+
+@pytest.mark.parametrize("status", ["UNSCORABLE", "JUDGE_ERROR", "IMPORT_ERROR", "NOT_APPLICABLE"])
+@pytest.mark.parametrize("score", [None, 0.0, 100.0])
+def test_non_scored_outcomes_are_unavailable_not_zero(tmp_path: Path, status: str, score: float | None) -> None:
+    _, page = _render(tmp_path, _case(status=status, score=score))
+    host = page.find("div", id="scorecard-host")
+    assert host.find("strong", **{"data-score": "total"}).text == "Unavailable"
+    assert status in host.text
+    assert all(node.text == "Not computed" for node in host.walk() if "data-contribution" in node.attrs)
+    assert "Final dimension contributions were not computed" in host.text
+    assert "Contribution sum unavailable" in host.text
+
+
+def test_gate_failure_zero_is_not_dimension_evaluation(tmp_path: Path) -> None:
+    case = _case(status="GATE_FAILED", score=0, steps=[], gate_votes={
+        "gpt": GateVote(decision="FAIL", rationale="The initial plan omits the required investigation."),
+    })
+    _, page = _render(tmp_path, case)
+    host = page.find("div", id="scorecard-host")
+    assert host.find("strong", **{"data-score": "total"}).text == "0.00"
+    assert all(node.text == "Not computed" for node in host.walk() if "data-contribution" in node.attrs)
+    assert "The initial plan omits" in host.text
+    assert host.find("p", **{"data-consistency": "not-evaluated"}).text == "Gate outcome only; no dimension sum."
+    case.score = None
+    assert report._case_view(case, EvaluationConfig().weights)["score"] is None
+
+
+def test_brief_dimension_specific_reasons_and_neutral_freshness(tmp_path: Path) -> None:
+    step = _scored_step(
+        freshness_reason="NO_DOCUMENT_NEUTRAL_CONVENTION: no referenced documents; not verified freshness",
+        votes={"gpt": 1, "claude": 0.5, "gemini": 1},
+        support=[ClaimSupport(claim_id="c", verdict="PARTIAL", rationale="Only part of the material claim is supported.")],
     )
-    assert url in page.text
-    assert not any(node.tag == "a" and node.attrs.get("target") == "_blank" for node in page.nodes)
+    judges = [
+        JudgeRecord(role="gpt", stage="step", step_id="step-1", model="model", request_sha256="hash",
+                    prompt_sha256="hash", mode="replay",
+                    output={"rationale": "The observations match the tool evidence.",
+                            "trust_rationale": "The approved production telemetry rule limits source trust."}),
+        JudgeRecord(role="claude", stage="step", step_id="excluded", model="model", request_sha256="hash",
+                    prompt_sha256="hash", mode="replay", output={"rationale": "EXCLUDED_REASON_SENTINEL"}),
+    ]
+    _, page = _render(tmp_path, _case(steps=[step], judges=judges))
+    host = page.find("div", id="scorecard-host")
+    for key, expected in {
+        "faithfulness": "The observations match the tool evidence.",
+        "coverage": "Only part of the material claim is supported.",
+        "source_trust": "The approved production telemetry rule limits source trust.",
+        "freshness": "neutral no-document convention, not verified freshness",
+    }.items():
+        assert expected in host.find("template", **{"data-dimension-detail": key}).text
+    assert "Model judgments differed; each step uses the median vote." in host.text
+    assert "EXCLUDED_REASON_SENTINEL" not in page.text
+    assert "not verified freshness" in host.find("button", **{"data-dimension": "freshness"}).text
+    doc = DocumentEvidence(id="d", url="https://example.test", step_id="step-1", status="AVAILABLE")
+    view = report._case_view(_case(steps=[step], documents=[doc]), EvaluationConfig().weights)
+    assert view["dimensions"][3]["neutral_count"] == 0
 
 
-@pytest.mark.parametrize("url", ["https://example.test/a?x=1&y=2#section", "HTTP://example.test/path", 'https://example.test/?q="<svg>'])
-def test_http_source_urls_are_escaped_and_isolated(tmp_path: Path, url: str) -> None:
-    _, page = _render(tmp_path, _case(documents=[DocumentEvidence(id="d", url=url, step_id="s", status="AVAILABLE")]))
-    anchor = page.find("a", target="_blank")
-    assert anchor.attrs == {"href": url, "target": "_blank", "rel": "noopener noreferrer"}
-    assert urlsplit(anchor.attrs["href"]).scheme.lower() in {"http", "https"}
-    assert not any(node.tag == "svg" for node in page.nodes)
+def test_report_contains_no_raw_payload_even_in_templates(tmp_path: Path) -> None:
+    sentinel = "SENSITIVE_RAW_SENTINEL " * 5000
+    path, page = _render(tmp_path, _raw_case(sentinel), run_id=sentinel, policy_sha256=sentinel, policy_version=sentinel)
+    html = path.read_text(encoding="utf-8")
+    assert "SENSITIVE_RAW_SENTINEL" not in html
+    assert len(html) < 40_000 and html.count("\n") < 400
+    assert not any(node.tag in {"table", "pre", "textarea", "iframe", "img", "object", "embed"} for node in page.nodes)
+    assert "application/json" not in html and "full_context" not in html
+    assert "Observed signals support the response." in page.text
+
+
+def test_reason_previews_are_bounded_and_not_hidden_in_full(tmp_path: Path) -> None:
+    judges = [
+        JudgeRecord(role="gpt", stage="step", step_id="step-1", model="m", request_sha256="h",
+                    prompt_sha256="h", mode="replay",
+                    output={"rationale": f"Brief reason {i}. " + "x" * 400 + "DO_NOT_EMBED_TAIL"})
+        for i in range(20)
+    ]
+    path, _ = _render(tmp_path, _case(judges=judges))
+    html = path.read_text()
+    assert "DO_NOT_EMBED_TAIL" not in html and "Brief reason 2." not in html
+    assert "Brief reason 0." in html and "..." in html
+    reasons = report._case_view(_case(judges=judges), EvaluationConfig().weights)["dimensions"][0]["reasons"]
+    assert len(reasons) == 2 and all(len(reason) <= 180 for reason in reasons)
+
+
+def test_identical_model_explanations_are_combined_without_zero_count_prose(tmp_path: Path) -> None:
+    shared = "The observations support the diagnosis."
+    second = "An independent result corroborates the finding."
+    texts = [shared, f"  {shared}\n", shared, second, "THIRD_EXPLANATION_SENTINEL"]
+    roles = ["gpt", "claude", "gemini", "gpt", "claude"]
+    judges = [
+        JudgeRecord(role=role, stage="step", step_id="step-1", model="model", request_sha256="hash",
+                    prompt_sha256="hash", mode="replay", output={"rationale": text})
+        for role, text in zip(roles, texts)
+    ]
+    case = _case(judges=judges, steps=[_scored_step(votes={"gpt": 1, "claude": 1, "gemini": 1})])
+    original = case.model_dump_json()
+    view = report._case_view(case, EvaluationConfig().weights)
+    assert view["dimensions"][0]["reasons"] == [shared, second]
+    path, page = _render(tmp_path, case)
+    detail = page.find("div", id="scorecard-host").find("template", **{"data-dimension-detail": "faithfulness"})
+    assert detail.text.count(shared) == 1 and detail.text.count(second) == 1
+    assert detail.find("p", **{"class": "distribution"}).text == "1 contributing step."
+    assert "Each step uses the median model faithfulness vote." in detail.text
+    for unwanted in ("0 at", "0 unavailable", "0 excluded", "0 structural", "disagree on 0", "Model judgments differed"):
+        assert unwanted not in detail.text
+    assert "THIRD_EXPLANATION_SENTINEL" not in path.read_text(encoding="utf-8")
+    assert case.model_dump_json() == original
+
+
+def test_untrusted_markup_and_html_marked_strings_are_escaped(tmp_path: Path) -> None:
+    attack = '<img src=x onerror="alert(1)">'
+    step = _scored_step(freshness_reason=attack, support=[
+        ClaimSupport(claim_id="c", verdict="PARTIAL", rationale=attack, references=[EvidenceRef(evidence_id="e", quote=attack)]),
+    ])
+    judge = JudgeRecord(role="gpt", stage="step", step_id="step-1", model="m", request_sha256="h",
+                        prompt_sha256="h", mode="replay", output={})
+    judge.output["rationale"] = Markup(attack)
+    judge.output["trust_rationale"] = Markup(attack)
+    path, page = _render(tmp_path, _case(case_id=attack, incident_id=attack, message_id=attack, steps=[step], judges=[judge]))
+    html = path.read_text(encoding="utf-8")
+    assert attack not in html and "&lt;img" in html and attack in page.text
+    for node in page.nodes:
+        assert node.tag not in {"img", "svg", "iframe", "object", "embed"}
+        assert not any(key.lower().startswith("on") for key in node.attrs)
+    assert len([node for node in page.nodes if node.tag == "script"]) == 1
+    assert "|safe" not in (Path(report.__file__).parent / "templates" / "report.html.j2").read_text()
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:alert(1)", "JaVaScRiPt:alert(1)", "file:///C:/private.txt", "data:text/html,<script>alert(1)</script>",
+    "vbscript:alert(1)", "//evil.example/path", " https://example.test", "https:\n//example.test",
+    "https://example.test\\@evil.test", "https://example.test:bad/path", "https://", "https://[bad-ip]/",
+    "relative/path", "\x00https://example.test", "https://example.test/a?x=1&y=2#section",
+    "HTTP://example.test/path", 'https://example.test/?q="<svg>',
+])
+def test_source_urls_are_not_embedded_or_linked(tmp_path: Path, url: str) -> None:
+    path, page = _render(tmp_path, _case(
+        evidence=[EvidenceItem(id="e", source_kind="source", origin=url, content="Text")],
+        documents=[DocumentEvidence(id="d", url=url, step_id="step-1", status="MISSING")],
+    ))
+    assert url not in path.read_text(encoding="utf-8")
+    assert not any(node.tag == "a" for node in page.nodes)
+
+
+@pytest.mark.parametrize("selected", [0, 1, 10, 12])
+def test_one_small_real_corpus_line(tmp_path: Path, selected: int) -> None:
+    _, page = _render(tmp_path, _case(), _case(synthetic=True), selected_real_cases=selected)
+    note = page.find("p", id="corpus-note").text
+    assert note == "Includes synthetic data. 1/10 real cases."
+    assert "Batch summary" not in page.text
+
+
+@pytest.mark.parametrize(
+    ("synthetic", "expected"),
+    [(True, "Synthetic data. 0/10 real cases."), (False, "1/10 real cases.")],
+)
+def test_synthetic_banner_uses_one_clear_real_case_count(tmp_path: Path, synthetic: bool, expected: str) -> None:
+    _, page = _render(tmp_path, _case(synthetic=synthetic), selected_real_cases=0 if synthetic else 1)
+    assert page.find("p", id="corpus-note").text == expected
+
+
+def test_empty_batch_and_cli_owned_log_guidance(tmp_path: Path) -> None:
+    output = tmp_path / "reports"
+    output.mkdir()
+    for name in ("results.json", "scoring-service.log"):
+        (output / name).write_bytes(b"PRIVATE_UNCHANGED")
+    path, page = _render(tmp_path, runtime_log_file=r"C:\private\context\scoring-service.log")
+    assert "No incident results available" in page.text
+    assert not any(node.tag == "select" for node in page.nodes)
+    assert page.find("code").text == "scoring-service.log"
+    assert "private" not in path.read_text() and "PRIVATE_UNCHANGED" not in path.read_text()
+    assert not any(node.tag == "a" for node in page.nodes)
+    for name in ("results.json", "scoring-service.log"):
+        assert (output / name).read_bytes() == b"PRIVATE_UNCHANGED"
+    assert {item.name for item in output.iterdir()} == {"index.html", "report.css", "report.js", "results.json", "scoring-service.log"}
+
+
+@pytest.mark.parametrize("log_file", [None, "scoring-service.log"], ids=["legacy-no-log-field", "new-log-pointer"])
+def test_render_never_fabricates_runtime_logs(tmp_path: Path, log_file: str | None) -> None:
+    payload = _batch(_case()).model_dump(mode="json", exclude={"runtime_log_file"})
+    if log_file is not None:
+        payload["runtime_log_file"] = log_file
+    batch = BatchResult.model_validate(payload)
+    assert batch.runtime_log_file == log_file
+    path = report.render_report(batch, tmp_path / "reports")
+    assert {item.name for item in path.parent.iterdir()} == {"index.html", "report.css", "report.js"}
+    assert not path.with_name("scoring-service.log").exists()
+    assert not path.with_name("results.json").exists()
+    html = path.read_text(encoding="utf-8")
+    assert ("Detailed diagnostics:" in html) == (log_file is not None)
 
 
 @contextmanager
@@ -472,9 +537,10 @@ def _request(address: tuple[str, int], path: str, method: str = "GET", headers: 
 
 
 def test_server_only_exposes_report_assets_and_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    index, _ = _render(tmp_path, _case(response_text="visible report"))
+    index, _ = _render(tmp_path, _case(incident_id="visible report"))
     (tmp_path / "parent-secret.txt").write_text("PRIVATE PARENT DATA")
-    (index.parent / "config.json").write_text("PRIVATE CONFIG DATA")
+    for name in ("config.json", "results.json", "scoring-service.log"):
+        (index.parent / name).write_text("PRIVATE DATA")
     for name in ("cache", "corpus", "nested"):
         (index.parent / name).mkdir()
         (index.parent / name / "index.html").write_text("PRIVATE NESTED DATA")
@@ -487,23 +553,38 @@ def test_server_only_exposes_report_assets_and_closes(tmp_path: Path, monkeypatc
             assert headers["X-Content-Type-Options"] == "nosniff"
             assert headers["Referrer-Policy"] == "no-referrer"
             assert "default-src 'none'" in headers["Content-Security-Policy"]
+            assert "script-src 'self'" in headers["Content-Security-Policy"]
+            assert "unsafe-inline" not in headers["Content-Security-Policy"]
         status, headers, body = _request(address, "/report.css")
         assert status == 200 and b"system-ui" in body
         assert headers["Content-Type"] == "text/css; charset=utf-8"
+        status, headers, body = _request(address, "/report.js")
+        assert status == 200 and b"showModal" in body
+        assert headers["Content-Type"] == "text/javascript; charset=utf-8"
         assert _request(address, "/", method="HEAD")[2] == b""
         for path in (
             "/../parent-secret.txt", "/%2e%2e/parent-secret.txt", "/..%2fparent-secret.txt",
             "/%252e%252e/parent-secret.txt", "/..\\parent-secret.txt", "/%2e%2e%5cparent-secret.txt",
-            "/config.json", "/cache/", "/corpus/", "/nested/index.html", "/./index.html",
-            "/report.css/../config.json", "/index.html/extra", "/index.html%00", "/%ff",
-            "/C:/private.txt", "http://evil.example/index.html",
+            "/config.json", "/results.json", "/scoring-service.log", "/cache/", "/corpus/", "/nested/index.html",
+            "/./index.html", "/report.css/../config.json", "/report.js/../results.json", "/index.html/extra",
+            "/index.html%00", "/%ff", "/C:/private.txt", "http://evil.example/index.html",
         ):
             status, _, body = _request(address, path, headers={"Host": f"{address[0]}:{address[1]}"})
             assert status == 404, path
             assert b"PRIVATE" not in body and b"Directory listing" not in body
-        assert _request(address, "/", headers={"Host": "evil.example"})[0] == 403
-        assert _request(address, "/", headers={"Host": "localhost@evil.example"})[0] == 403
-        assert _request(address, "/", headers={"Host": "localhost:1"})[0] == 403
+        for host in ("evil.example", "localhost@evil.example", "localhost:1", "0.0.0.0"):
+            assert _request(address, "/", headers={"Host": host})[0] == 403
+        connection = http.client.HTTPConnection(*address, timeout=3)
+        try:
+            connection.putrequest("GET", "/", skip_host=True)
+            connection.putheader("Host", f"{address[0]}:{address[1]}")
+            connection.putheader("Host", "evil.example")
+            connection.endheaders()
+            response = connection.getresponse()
+            assert response.status == 403
+            response.read()
+        finally:
+            connection.close()
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.1", "8.8.8.8", "example.test", "localhost.evil.test", "127.1", "", "::1%eth0", "::ffff:127.0.0.1"])
@@ -559,6 +640,13 @@ def test_unrendered_directories_and_directory_assets_rejected(tmp_path: Path) ->
         report.render_report(_batch(), tmp_path)
 
 
+def test_missing_javascript_rejected_before_serving(tmp_path: Path) -> None:
+    path, _ = _render(tmp_path, _case())
+    path.with_name("report.js").unlink()
+    with pytest.raises(ValueError, match="report.js"):
+        report.serve_reports(path.parent, port=0)
+
+
 def _symlink(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target, target_is_directory=target.is_dir())
@@ -578,7 +666,7 @@ def test_symlink_roots_and_ancestors_rejected(tmp_path: Path) -> None:
     assert not (index.parent / "new-child").exists()
 
 
-@pytest.mark.parametrize("name", ["index.html", "report.css"])
+@pytest.mark.parametrize("name", ["index.html", "report.css", "report.js"])
 def test_linked_assets_never_read_or_overwritten(tmp_path: Path, name: str) -> None:
     index, _ = _render(tmp_path, _case())
     outside = tmp_path / "private.txt"
@@ -606,16 +694,18 @@ def test_hardlinked_assets_rejected(tmp_path: Path) -> None:
     assert outside.read_text() == "SECRET"
 
 
-def test_asset_symlink_swap_after_startup_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("name", ["index.html", "report.js"])
+def test_asset_symlink_swap_after_startup_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     index, _ = _render(tmp_path, _case())
     outside = tmp_path / "private.txt"
     outside.write_text("PRIVATE OUTSIDE")
     candidate = tmp_path / "candidate-link"
     _symlink(candidate, outside)
     with _running_server(index.parent, monkeypatch) as address:
-        index.unlink()
-        candidate.replace(index)
-        status, _, body = _request(address, "/")
+        asset = index.parent / name
+        asset.unlink()
+        candidate.replace(asset)
+        status, _, body = _request(address, f"/{name}")
         assert status == 404 and b"PRIVATE OUTSIDE" not in body
 
 

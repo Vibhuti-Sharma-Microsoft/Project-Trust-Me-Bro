@@ -1,55 +1,107 @@
-// READ ONLY, manual data preparation only. Never executed by the scorer.
-// In the appropriate Application Insights scope, change ExportTable and export one file per table.
-// Expand Scope with the curated threads/windows for the predefined incident list.
-// Scope includes post acknowledgments; the local importer enforces each response's stricter cutoff.
-let ExportTable = "customEvents";
-let Scope = datatable(ThreadId:string, WindowStart:datetime, WindowEnd:datetime)
-[
-    "REPLACE_WITH_VERIFIED_THREAD_ID", datetime(2026-01-01T00:00:00Z), datetime(2026-01-02T00:00:00Z)
-];
-let FirstTime = toscalar(Scope | summarize min(WindowStart));
-let LastTime = toscalar(Scope | summarize max(WindowEnd));
-let Threads = Scope | project ThreadId;
-let Base =
+// READ ONLY. Run manually in the same Application Insights resource as discovery.
+//
+// IMPORTANT: first discover the thread/time with discover-incident.kql.
+// Then export ONE incident and ONE narrow UTC window per run.
+// Export the final result as CSV or JSON. Do not copy from the portal results grid.
+// This deliberately returns native telemetry columns: pack_all()/tostring() creates
+// very large dynamic cells and makes portal/export truncation much more likely.
+//
+// Supported scorer tables:
+// customEvents, dependencies, genAIContent, traces, requests, exceptions
+//
+// Change these values for every export. ThreadId must not be empty.
+let TargetIncident = "868627855";
+let ThreadId = "83d05a92-d90c-4990-95c8-72d587ff8c9c";
+let WindowStart = datetime(2026-09-15T23:30:00Z);
+let WindowEnd = datetime(2026-09-16T02:00:00Z);
+
+let ValidSelection =
+    isnotempty(TargetIncident)
+    and isnotempty(ThreadId)
+    and WindowStart < WindowEnd;
+let Meta = (T: (*)) {
+    T
+    | where todatetime(column_ifexists("timestamp", datetime(null))) >= WindowStart
+        and todatetime(column_ifexists("timestamp", datetime(null))) < WindowEnd
+    | project
+        NativeTraceId = tostring(column_ifexists("operation_Id", "")),
+        cd = column_ifexists("customDimensions", dynamic({}))
+    | extend
+        CustomTraceId = tostring(cd.TraceId),
+        Thread1 = tostring(cd.ThreadId),
+        Thread2 = tostring(cd.ChatThreadId),
+        Thread3 = tostring(cd.thread_id)
+};
+let TraceSeeds = materialize(
     union
-        (customEvents | extend ExportSourceTable = "customEvents"),
-        (dependencies | extend ExportSourceTable = "dependencies"),
-        (genAIContent | extend ExportSourceTable = "genAIContent"),
-        (traces | extend ExportSourceTable = "traces"),
-        (requests | extend ExportSourceTable = "requests"),
-        (exceptions | extend ExportSourceTable = "exceptions")
-    | where timestamp >= FirstTime and timestamp < LastTime;
-let Direct =
-    Base
-    | where tostring(customDimensions.ThreadId) in (Threads)
-        or tostring(customDimensions.ChatThreadId) in (Threads)
-        or tostring(customDimensions.thread_id) in (Threads);
-let NativeTraces = Direct | where isnotempty(operation_Id) | distinct operation_Id;
-let CustomTraces = Direct
-    | extend TraceId = tostring(customDimensions.TraceId)
-    | where isnotempty(TraceId) | distinct TraceId;
-let Linked =
-    Base
-    | where operation_Id in (NativeTraces) or tostring(customDimensions.TraceId) in (CustomTraces)
-        or tostring(customDimensions.ThreadId) in (Threads)
-        or tostring(customDimensions.ChatThreadId) in (Threads)
-        or tostring(customDimensions.thread_id) in (Threads);
-let ContentIds = Linked
-    | where ExportSourceTable == "dependencies"
-    | extend ContentId = tostring(customDimensions["_MS.GenAIContentId"])
-    | where isnotempty(ContentId) | distinct ContentId;
-let Selected =
-    Base
-    | where operation_Id in (NativeTraces) or tostring(customDimensions.TraceId) in (CustomTraces)
-        or tostring(customDimensions.ThreadId) in (Threads)
-        or tostring(customDimensions.ChatThreadId) in (Threads)
-        or tostring(customDimensions.thread_id) in (Threads)
-        or (ExportSourceTable == "genAIContent"
-            and tostring(customDimensions["_MS.GenAIContentId"]) in (ContentIds));
-// To obtain count expectations, replace the final expression with:
-// Selected | summarize ExpectedRows=count() by ExportSourceTable
-Selected
-| where ExportSourceTable == ExportTable
-| extend timestamp = format_datetime(timestamp, "yyyy-MM-ddTHH:mm:ss.fffffffZ")
-| project-away ExportSourceTable
-| order by timestamp asc
+        (Meta(customEvents)),
+        (Meta(dependencies)),
+        (Meta(traces)),
+        (Meta(requests)),
+        (Meta(exceptions))
+    | where Thread1 == ThreadId or Thread2 == ThreadId or Thread3 == ThreadId
+    | distinct NativeTraceId, CustomTraceId
+);
+let NativeTraces =
+    TraceSeeds
+    | where isnotempty(NativeTraceId)
+    | distinct NativeTraceId;
+let CustomTraces =
+    TraceSeeds
+    | where isnotempty(CustomTraceId)
+    | distinct CustomTraceId;
+let ContentIds = materialize(
+    dependencies
+    | where timestamp >= WindowStart and timestamp < WindowEnd
+    | extend cd = customDimensions
+    | where
+        tostring(cd.ThreadId) == ThreadId
+        or tostring(cd.ChatThreadId) == ThreadId
+        or tostring(cd.thread_id) == ThreadId
+        or tostring(operation_Id) in (NativeTraces)
+        or tostring(cd.TraceId) in (CustomTraces)
+    | extend ContentId = tostring(cd["_MS.GenAIContentId"])
+    | where isnotempty(ContentId)
+    | distinct ContentId
+);
+union kind=outer withsource=SourceTable
+    customEvents,
+    dependencies,
+    genAIContent,
+    traces,
+    requests,
+    exceptions
+| where ValidSelection
+| where timestamp >= WindowStart and timestamp < WindowEnd
+| extend _cd = customDimensions
+| where
+    tostring(_cd.ThreadId) == ThreadId
+    or tostring(_cd.ChatThreadId) == ThreadId
+    or tostring(_cd.thread_id) == ThreadId
+    or tostring(operation_Id) in (NativeTraces)
+    or tostring(_cd.TraceId) in (CustomTraces)
+    or (
+        SourceTable endswith "genAIContent"
+        and tostring(_cd["_MS.GenAIContentId"]) in (ContentIds)
+    )
+| extend IncidentId = TargetIncident
+| project-reorder IncidentId, SourceTable, timestamp
+| project-away _cd
+| order by SourceTable asc, timestamp asc
+
+// COMPLETENESS CHECK
+// Before exporting, replace the final four lines above with:
+// | summarize ExpectedRows=count(), FirstTimestamp=min(timestamp),
+//     LastTimestamp=max(timestamp) by SourceTable
+//
+// If an export approaches the portal's row/download limit, divide WindowStart/WindowEnd
+// into non-overlapping intervals and export each slice separately. Keep the exact
+// [inclusive, exclusive) boundaries in the file name, for example:
+// customEvents.2026-03-01T000000Z.2026-03-08T000000Z.csv
+//
+// Split/merge downloaded slices locally with:
+// .\.venv\Scripts\python.exe -m scoring_service split-export `
+//   --incident-id 868627855 `
+//   --input .\downloads\868627855.2026-03.csv `
+//   --input .\downloads\868627855.2026-04.csv `
+//   --directory .\data\real-pilot\incidents\868627855

@@ -1,4 +1,5 @@
 .venv/
+.venv*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -16,6 +17,7 @@ config/*.local.json
 *.p12
 /*.csv
 /*.jsonl
+/*.log
 *.egg-info/
 dist/
 build/
@@ -25,3 +27,5 @@ htmlcov/
 Thumbs.db
 .vscode/
 .idea/
+.csv
+.zip

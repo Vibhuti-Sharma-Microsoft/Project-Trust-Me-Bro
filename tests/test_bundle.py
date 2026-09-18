@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from sre_assurance.bundle import build_bundle, payload_flags
-from sre_assurance.imports import ImportFailure, write_json
+from scoring_service.bundle import build_bundle, payload_flags
+from scoring_service.imports import ImportFailure, write_json
 
 
 def _events(root, case):
@@ -124,7 +124,7 @@ def test_posting_body_must_match_selected_response(corpus):
 
 
 def test_post_body_normalization_preserves_query_attachment():
-    from sre_assurance.bundle import _validate_post_body, response_text
+    from scoring_service.bundle import _validate_post_body, response_text
     body = "## Findings\n\n| Field | Value |\n|---|---|\n| Region | eastus |"
     query = "T | where x > 1"
     rendered = "<pre>T | where x &gt; 1</pre><h2>Findings</h2><table><tr><th>Field</th><th>Value</th></tr><tr><td>Region</td><td>eastus</td></tr></table>"

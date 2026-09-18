@@ -2,10 +2,10 @@ import json
 
 import pytest
 
-from sre_assurance.cli import main
-from sre_assurance.corpus import IncidentRoster, prepare_corpus
-from sre_assurance.imports import write_json
-from sre_assurance.models import CorpusManifest
+from scoring_service.cli import main
+from scoring_service.corpus import IncidentRoster, prepare_corpus
+from scoring_service.imports import write_json
+from scoring_service.models import CorpusManifest
 
 
 def test_prepares_exact_roster_without_fabricating_evidence(tmp_path):

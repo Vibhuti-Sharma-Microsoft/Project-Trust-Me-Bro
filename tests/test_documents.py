@@ -11,9 +11,9 @@ from typing import Callable
 import httpx
 import pytest
 
-from sre_assurance.config import EvaluationConfig, digest
-from sre_assurance.documents import DocumentStore
-from sre_assurance.models import DocumentSpec
+from scoring_service.config import EvaluationConfig, digest
+from scoring_service.documents import DocumentStore
+from scoring_service.models import DocumentSpec
 
 
 CUTOFF = "2025-02-01T12:00:00Z"
@@ -347,7 +347,7 @@ def test_live_and_replayed_document_dumps_are_identical(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified: bool,
 ) -> None:
     document = spec(version="v1", historical_version_verified=verified, last_updated=UPDATED)
-    monkeypatch.setattr("sre_assurance.documents.utc_now", lambda: "2025-03-01T00:00:00Z")
+    monkeypatch.setattr("scoring_service.documents.utc_now", lambda: "2025-03-01T00:00:00Z")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/runbook":
@@ -358,7 +358,7 @@ def test_live_and_replayed_document_dumps_are_identical(
     assert original.status == "AVAILABLE"
     cache_path = next((tmp_path / "cache" / "documents").glob("*.json"))
     cached_bytes = cache_path.read_bytes()
-    monkeypatch.setattr("sre_assurance.documents.utc_now", lambda: "2026-09-17T00:00:00Z")
+    monkeypatch.setattr("scoring_service.documents.utc_now", lambda: "2026-09-17T00:00:00Z")
     for _ in range(2):
         replayed = store(tmp_path, mode="replay", allowed_document_hosts=[]).fetch(document, CUTOFF)
         assert replayed.model_dump() == original.model_dump()
@@ -375,12 +375,12 @@ def test_local_snapshot_dumps_are_stable_across_live_and_replay(
     document = spec(snapshot_path="doc",
                     snapshot_sha256=hashlib.sha256(data).hexdigest() if verified else None,
                     version="v1", last_updated=UPDATED, historical_version_verified=verified)
-    monkeypatch.setattr("sre_assurance.documents.utc_now", lambda: "2025-03-01T00:00:00Z")
+    monkeypatch.setattr("scoring_service.documents.utc_now", lambda: "2025-03-01T00:00:00Z")
     original = store(tmp_path).fetch(document, CUTOFF)
     assert original.status == "AVAILABLE"
     cache_path = next((tmp_path / "cache" / "documents").glob("*.json"))
     cached_bytes = cache_path.read_bytes()
-    monkeypatch.setattr("sre_assurance.documents.utc_now", lambda: "2026-09-17T00:00:00Z")
+    monkeypatch.setattr("scoring_service.documents.utc_now", lambda: "2026-09-17T00:00:00Z")
     for mode in ("replay", "live", "replay"):
         replayed = store(tmp_path, mode=mode).fetch(document, CUTOFF)
         assert replayed.model_dump() == original.model_dump()
@@ -470,7 +470,7 @@ def test_cache_revalidates_current_size_limit(tmp_path: Path) -> None:
 
 
 def test_default_transport_rejects_private_dns_without_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("sre_assurance.documents.socket.getaddrinfo",
+    monkeypatch.setattr("scoring_service.documents.socket.getaddrinfo",
                         lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))])
     def no_request(*args: object, **kwargs: object) -> None:
         pytest.fail("Private DNS result reached HTTP client")
@@ -483,7 +483,7 @@ def test_default_transport_rejects_private_dns_without_request(tmp_path: Path, m
 def test_default_transport_pins_public_address_and_preserves_tls_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("sre_assurance.documents.socket.getaddrinfo",
+    monkeypatch.setattr("scoring_service.documents.socket.getaddrinfo",
                         lambda *args, **kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))])
 
     @contextmanager
@@ -508,7 +508,7 @@ def test_dns_resolution_is_bounded_by_request_timeout(tmp_path: Path, monkeypatc
         release.wait(5)
         return [(2, 1, 6, "", ("8.8.8.8", 443))]
 
-    monkeypatch.setattr("sre_assurance.documents.socket.getaddrinfo", slow_resolution)
+    monkeypatch.setattr("scoring_service.documents.socket.getaddrinfo", slow_resolution)
     def no_request(*args: object, **kwargs: object) -> None:
         pytest.fail("Timed-out DNS resolution reached HTTP client")
     monkeypatch.setattr(httpx.Client, "stream", no_request)

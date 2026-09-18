@@ -1,0 +1,21 @@
+// READ ONLY. Cheap first-stage discovery: scans customEvents only.
+// Set the portal time picker to the same or a wider UTC range than SearchStart/SearchEnd.
+let TargetIncident = "868627855";
+let SearchStart = datetime(2026-09-15T00:00:00Z);
+let SearchEnd = datetime(2026-09-17T00:00:00Z);
+customEvents
+| where timestamp >= SearchStart and timestamp < SearchEnd
+| where name == "IncidentActivitySnapshot"
+| where tostring(customDimensions.IncidentId) == TargetIncident
+| extend ThreadId = coalesce(
+    tostring(customDimensions.ThreadId),
+    tostring(customDimensions.ChatThreadId),
+    tostring(customDimensions.thread_id)
+)
+| where isnotempty(ThreadId)
+| summarize
+    FirstSeen=min(timestamp),
+    LastSeen=max(timestamp),
+    SnapshotRows=count()
+    by IncidentId=tostring(customDimensions.IncidentId), ThreadId
+| order by FirstSeen asc

@@ -58,3 +58,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "type checking failed" }
           & $python -m pip wheel --no-deps --wheel-dir dist .
           if ($LASTEXITCODE -ne 0) { throw "package build failed" }
+      - name: Browser interaction checks
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        env:
+          SCORING_SERVICE_BROWSER_CHANNEL: chromium
+        run: |
+          $python = Join-Path $PWD ".venv" "bin" "python"
+          & $python -m pip install -c requirements-dev.lock -e ".[browser]"
+          if ($LASTEXITCODE -ne 0) { throw "browser test dependencies failed" }
+          & $python -m playwright install --with-deps chromium
+          if ($LASTEXITCODE -ne 0) { throw "browser installation failed" }
+          & $python -m pytest -q -m browser
+          if ($LASTEXITCODE -ne 0) { throw "browser interaction checks failed" }

@@ -5,7 +5,9 @@ import json
 import logging
 import re
 import sys
+import traceback
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Sequence
 
@@ -14,14 +16,16 @@ from .config import load_config
 from .corpus import prepare_corpus
 from .demo import create_demo
 from .executor import evaluate_case
+from .export_splitter import split_exports
 from .imports import load_manifest, write_json
 from .models import BatchResult
 from .report import render_report, serve_reports
+from .runtime_log import RuntimeJournal, RuntimeLogError
 from .time_utils import utc_now
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Local response-level SRE evidence scoring; never writes to IcM.")
+    root = argparse.ArgumentParser(prog="scoring-service", description="Local response-level evidence scoring; never writes to IcM.")
     commands = root.add_subparsers(dest="command", required=True)
     demo = commands.add_parser("demo", help="Generate ten clearly labeled synthetic replay cases")
     demo.add_argument("--directory", type=Path, default=Path("data/demo"))
@@ -30,11 +34,15 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--directory", type=Path, required=True)
     validate = commands.add_parser("validate", help="Validate local evidence without model/network calls")
     validate.add_argument("--manifest", type=Path, required=True)
+    split = commands.add_parser("split-export", help="Split one or more mixed App Insights CSV exports by table")
+    split.add_argument("--input", type=Path, action="append", required=True)
+    split.add_argument("--incident-id", required=True)
+    split.add_argument("--directory", type=Path, required=True)
     evaluate = commands.add_parser("evaluate", help="Evaluate selected local cases and produce JSON/HTML")
-    evaluate.add_argument("--manifest", type=Path, required=True)
-    evaluate.add_argument("--config", type=Path)
+    evaluate.add_argument("--manifest", type=Path, default=Path("data/real-pilot/cases.json"))
+    evaluate.add_argument("--config", type=Path, default=Path("config/evaluation.local.json"))
     evaluate.add_argument("--case", action="append", default=[])
-    evaluate.add_argument("--judge-mode", choices=["replay", "live"], default="replay")
+    evaluate.add_argument("--judge-mode", choices=["replay", "copilot", "live"], default="copilot")
     evaluate.add_argument("--cache-directory", type=Path, default=Path(".cache"))
     evaluate.add_argument("--out", type=Path, default=Path("out"))
     evaluate.add_argument("--run-id")
@@ -50,7 +58,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     try:
         if args.command == "demo":
             manifest = create_demo(args.directory)
@@ -59,6 +67,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "prepare-corpus":
             path = prepare_corpus(args.incidents_file, args.directory)
             print(f"Collection plan: {path}\nState: AWAITING_EXPORTS (not an executable evaluation manifest)")
+            return 0
+        if args.command == "split-export":
+            counts = split_exports(args.input, args.incident_id, args.directory)
+            print(json.dumps({"incident_id": args.incident_id, "tables": counts}, indent=2))
             return 0
         if args.command == "serve":
             if not 1 <= args.port <= 65535:
@@ -95,18 +107,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if output_dir.exists():
             raise FileExistsError("Run output already exists; choose a new --run-id")
         config = load_config(args.config)
-        results = [evaluate_case(case, root, config, args.cache_directory, args.judge_mode) for case in selected]
-        batch = BatchResult(run_id=run_id, created_at=utc_now(), policy_version=config.policy_version,
-                            policy_sha256=config.policy_sha256, weights=config.weights, target_real_cases=manifest.target_real_cases,
-                            selected_real_cases=sum(not case.synthetic for case in selected), results=results)
-        write_json(output_dir / "results.json", batch.model_dump(mode="json"))
-        report = render_report(batch, output_dir)
-        print(f"JSON: {output_dir / 'results.json'}\nHTML: {report}")
-        print(f"Real cases: {batch.selected_real_cases}/{batch.target_real_cases}; synthetic cases: {sum(case.synthetic for case in selected)}")
-        for result in results:
-            print(f"{result.case_id}: {result.status}, score={result.score}")
+        output_dir.mkdir(parents=True, exist_ok=False)
+        log_path = output_dir / "scoring-service.log"
+        with RuntimeJournal(log_path) as journal:
+            try:
+                journal.event("run.started", run_id=run_id, policy_version=config.policy_version,
+                              policy_sha256=config.policy_sha256, weights=config.weights, judge_mode=args.judge_mode,
+                              selected_cases=[case.id for case in selected], real_case_count=sum(not case.synthetic for case in selected),
+                              synthetic_case_count=sum(case.synthetic for case in selected),
+                              models={role: endpoint.model for role, endpoint in config.models.items()})
+                results = [evaluate_case(case, root, config, args.cache_directory, args.judge_mode, journal=journal)
+                           for case in selected]
+                batch = BatchResult(run_id=run_id, created_at=utc_now(), policy_version=config.policy_version,
+                                    policy_sha256=config.policy_sha256, weights=config.weights, target_real_cases=manifest.target_real_cases,
+                                    selected_real_cases=sum(not case.synthetic for case in selected), results=results,
+                                    runtime_log_file=log_path.name)
+                write_json(output_dir / "results.json", batch.model_dump(mode="json"))
+                journal.event("results.saved", path=str(output_dir / "results.json"), cases=len(results))
+                report = render_report(batch, output_dir)
+                journal.event("report.rendered", path=str(report))
+                journal.event("run.completed", statuses=dict(Counter(result.status for result in results)),
+                              case_scores={result.case_id: result.score for result in results})
+            except RuntimeLogError:
+                raise
+            except KeyboardInterrupt:
+                journal.event("run.interrupted", reason="Execution interrupted; partial log retained.")
+                raise
+            except Exception as exc:
+                journal.event("run.failed", error_type=type(exc).__name__, error=str(exc), stack_trace=traceback.format_exc())
+                raise
+        print(f"Scorecard: {report}\nDetailed runtime log: {log_path}\nResults: {output_dir / 'results.json'}")
+        print(f"Cases: {len(results)}; real: {batch.selected_real_cases}/{batch.target_real_cases}; "
+              f"synthetic: {sum(case.synthetic for case in selected)}")
         return 1 if any(result.status in {"UNSCORABLE", "JUDGE_ERROR", "IMPORT_ERROR"} for result in results) else 0
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeLogError) as exc:
         logging.error("%s", exc)
         return 2
     except KeyboardInterrupt:

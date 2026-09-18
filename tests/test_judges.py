@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
-from sre_assurance.config import EvaluationConfig, ModelEndpoint, TrustRule, digest
-from sre_assurance.judges import JudgeError, JudgeService
-from sre_assurance.models import ClaimsDecision, GateVote, StepJudgment
+from scoring_service.config import EvaluationConfig, ModelEndpoint, TrustRule, digest
+from scoring_service.judges import JudgeError, JudgeService
+from scoring_service.models import ClaimsDecision, GateVote, StepJudgment
 
 
 @pytest.fixture
@@ -245,6 +247,88 @@ def test_missing_role_and_invalid_stage(tmp_path, config, payload):
         JudgeService(config, tmp_path, mode="live", allow_unbound_replay=True)
 
 
+def test_copilot_mode_uses_isolated_runner_validation_and_cache(tmp_path, config, payload, gate):
+    calls = []
+
+    def runner(request, repair):
+        calls.append((request, repair))
+        assert request.protocol == "copilot_sdk"
+        return json.dumps(gate)
+
+    for endpoint in config.models.values():
+        endpoint.endpoint_env = ""
+        endpoint.auth_env = ""
+        endpoint.allowed_host = ""
+    service = JudgeService(config, tmp_path, mode="copilot", copilot_runner=runner)
+    assert service.judge("gpt", "todo_gate", payload).decision == "PASS"
+    assert service.judge("gpt", "todo_gate", payload).decision == "PASS"
+    assert len(calls) == 1
+    assert [record.mode for record in service.records] == ["copilot", "cache"]
+
+
+def test_copilot_mode_repairs_invalid_json_once(tmp_path, config, payload, gate):
+    repairs = []
+
+    def runner(request, repair):
+        repairs.append(repair)
+        return "{}" if not repair else json.dumps(gate)
+
+    service = JudgeService(config, tmp_path, mode="copilot", copilot_runner=runner)
+    assert service.judge("gpt", "todo_gate", payload).decision == "PASS"
+    assert repairs == [False, True]
+
+
+def test_copilot_sdk_session_is_isolated(tmp_path, config, payload, gate, monkeypatch):
+    captured = {}
+
+    class Context:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Session:
+        async def send_and_wait(self, content, *, timeout):
+            captured["content"] = content
+            captured["timeout"] = timeout
+            return SimpleNamespace(data=SimpleNamespace(content=json.dumps(gate)))
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def create_session(self, **kwargs):
+            captured["session"] = kwargs
+            return Context(Session())
+
+    import copilot
+
+    monkeypatch.setattr(copilot, "CopilotClient", Client)
+    service = JudgeService(config, tmp_path, mode="copilot")
+    request = service._prepare("gpt", "todo_gate", payload, None)
+    text = asyncio.run(service._copilot_sdk_text(request, False, tmp_path / "runtime", 12))
+    assert json.loads(text)["decision"] == "PASS"
+    assert captured["client"]["mode"] == "empty"
+    assert captured["client"]["use_logged_in_user"] is True
+    assert captured["session"]["available_tools"] == []
+    assert captured["session"]["memory"] == {"enabled": False}
+    assert captured["session"]["enable_session_store"] is False
+    assert captured["session"]["infinite_sessions"] == {"enabled": False}
+    assert captured["session"]["model"] == "approved-gpt-version"
+    assert captured["content"] == request.user_content
+    assert captured["timeout"] == 12
+
+
 @pytest.mark.parametrize("model", ["", "YOUR_MODEL", "replace-me", "<deployment>", "placeholder", "synthetic-gpt", " model "])
 def test_placeholder_models_rejected(tmp_path, config, payload, model):
     config.models["gpt"].model = model
@@ -285,7 +369,7 @@ def test_approval_auth_and_host_required(tmp_path, config, payload, monkeypatch)
     config.models["gpt"].approved_for_incident_data = True
     config.models["gpt"].allowed_host = "*.example.test"
     with pytest.raises(JudgeError, match="exact allowed host"):
-        JudgeService(config, tmp_path).judge("gpt", "todo_gate", payload)
+        JudgeService(config, tmp_path, mode="live").judge("gpt", "todo_gate", payload)
     config.models["gpt"].allowed_host = "judges.example.test"
     monkeypatch.delenv("JUDGE_SECRET")
     with pytest.raises(JudgeError, match="authentication"):
@@ -329,6 +413,8 @@ def test_gate_enum_rejected(tmp_path, payload, gate, decision):
 
 
 def test_claim_exact_quotes_and_binding_references(tmp_path, payload):
+    payload["steps"] = [{"id": "s1", "title": "Inspect error telemetry", "kind": "evidence"}]
+    payload["calls"] = [{"id": "call1"}]
     output = {
         "claims": [
             {"id": "c1", "quote": "Error rate was 12%.", "step_id": "s1", "claim_type": "observation", "material": True}
@@ -390,6 +476,27 @@ def test_trust_policy_required_and_bounded(tmp_path, config, payload, step, muta
         synthetic(tmp_path, step, stage="step", config=config).judge("gpt", "step", payload, "s1")
 
 
+def test_mixed_sources_use_lowest_trust_ceiling(tmp_path, config, payload, step):
+    config.trust_rules.append(TrustRule(
+        id="incident",
+        source_kind="incident",
+        origin_prefix="icm:",
+        maximum_score=0.5,
+        instructions="Incident metadata is capped at partial trust.",
+    ))
+    payload["evidence"].append({
+        "id": "e2",
+        "source_kind": "incident",
+        "origin": "icm:1",
+        "content": "Incident metadata.",
+        "eligible": True,
+    })
+    step["references"].append({"evidence_id": "e2", "quote": "Incident metadata."})
+    step["trust_policy_ids"].append("incident")
+    with pytest.raises(JudgeError, match="Invalid replay"):
+        synthetic(tmp_path, step, stage="step", config=config).judge("gpt", "step", payload, "s1")
+
+
 @pytest.mark.parametrize("protocol", ["openai_chat", "openai_responses"])
 def test_schema_repair_once_and_transient_budget(tmp_path, config, payload, gate, protocol):
     config.models["gpt"].protocol = protocol
@@ -426,6 +533,101 @@ def test_invalid_output_never_cached_and_only_one_repair(tmp_path, config, paylo
     assert len(requests) == 2
     assert service.records == []
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_copilot_json_markdown_fence_is_transport_only(tmp_path, config, payload, gate):
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: f"```json\n{json.dumps(gate)}\n```",
+    )
+    assert service.judge("gpt", "todo_gate", payload).decision == "PASS"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "Explanation:\n```json\n{}\n```",
+        "```json\n{}\n```\nAdditional explanation",
+        "```json\n{}\n```\n```json\n{}\n```",
+    ],
+)
+def test_copilot_json_fence_rejects_surrounding_content(tmp_path, config, payload, response):
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: response,
+    )
+    with pytest.raises(JudgeError, match="repair/attempt budget"):
+        service.judge("gpt", "todo_gate", payload)
+
+
+def test_todo_step_description_is_an_exact_reference_source(tmp_path, config, payload, gate):
+    payload["todo"]["steps"][0]["description"] = "Query errors, compare timestamps, and preserve uncertainty."
+    gate["references"] = [{
+        "evidence_id": "todo:s1",
+        "quote": "Query errors, compare timestamps, and preserve uncertainty.",
+    }]
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: json.dumps(gate),
+    )
+    assert service.judge("gpt", "todo_gate", payload).decision == "PASS"
+
+
+def test_reconstructed_todo_reference_remains_invalid(tmp_path, config, payload, gate):
+    payload["todo"]["steps"][0]["description"] = "Query errors and compare timestamps."
+    gate["references"] = [{
+        "evidence_id": "todo:s1",
+        "quote": "Inspect error telemetry; query errors and compare timestamps.",
+    }]
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: json.dumps(gate),
+    )
+    with pytest.raises(JudgeError, match="repair/attempt budget"):
+        service.judge("gpt", "todo_gate", payload)
+
+
+def test_json_string_leaf_is_an_exact_reference_source(tmp_path, config, payload, step):
+    payload["evidence"][0]["content"] = json.dumps({
+        "title": 'Refresh token after "expired" response',
+        "status": "Open",
+    })
+    step["references"] = [{
+        "evidence_id": "e1",
+        "quote": 'Refresh token after "expired" response',
+    }]
+    step["claim_support"][0]["references"] = copy.deepcopy(step["references"])
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: json.dumps(step),
+    )
+    assert service.judge("gpt", "step", payload, "s1").faithfulness == 1
+
+
+def test_placeholder_reference_is_removed_when_valid_support_remains(tmp_path, config, payload, gate):
+    payload["context"] = "Title: <redacted:unscannable>\nImpacted service: PROJECTLIFTR"
+    gate["references"] = [
+        {"evidence_id": "context", "quote": "Title: <redacted:unscannable>"},
+        {"evidence_id": "context", "quote": "Impacted service: PROJECTLIFTR"},
+    ]
+    service = JudgeService(
+        config,
+        tmp_path,
+        mode="copilot",
+        copilot_runner=lambda request, repair: json.dumps(gate),
+    )
+    result = service.judge("gpt", "todo_gate", payload)
+    assert [ref.quote for ref in result.references] == ["Impacted service: PROJECTLIFTR"]
 
 
 @pytest.mark.parametrize("status", [401, 403, 400, 302, 429, 503])
@@ -530,7 +732,7 @@ def test_request_key_binds_payload_policy_model_protocol_inference_and_prompt(tm
         else:
             alternative.max_attempts = 3
         assert original != JudgeService(alternative, tmp_path).request_key("gpt", "todo_gate", payload)
-    import sre_assurance.judges as judges
+    import scoring_service.judges as judges
 
     original_hash = judges._sha_text
     monkeypatch.setattr(judges, "_sha_text", lambda text: original_hash(text + "changed prompt"))

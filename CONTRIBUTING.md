@@ -11,7 +11,7 @@ The standalone project is the repository boundary. Do not initialize or push its
 | Person | Primary track | Owned areas |
 |---|---|---|
 | **A: data and evidence** | Collect the real corpus; verify response identity/cutoffs; normalize sources and document metadata | `corpus.py`, `imports.py`, `bundle.py`, `time_utils.py`, `documents.py`, `tools`, corresponding tests, private data |
-| **B: judges and evaluation** | Configure approved models; refine judgments/policies; review scores and present results | `judges.py`, `prompts`, `scoring.py`, `executor.py`, `report.py`, templates/assets, corresponding tests |
+| **B: judges and evaluation** | Configure approved models; refine judgments/policies; review scores and present results | `judges.py`, `prompts`, `scoring.py`, `executor.py`, `runtime_log.py`, `report.py`, templates/assets, corresponding tests |
 | **Joint review** | Data/result contracts, CLI boundaries, policy decisions and release readiness | `models.py`, `config.py`, `cli.py`, `pyproject.toml`, constraints, README and CI |
 
 A and B are ownership roles, not GitHub usernames. Add actual handles to CODEOWNERS only after the repository and accounts are known.
@@ -51,6 +51,8 @@ Treat changes to weights, bands, applicability or missing-evidence handling as v
 - Future evidence cannot justify a previous response.
 - Judge/model/prompt/policy provenance and source references remain inspectable.
 - HTML treats every incident/model/document value as untrusted text.
+- The scorecard remains minimal; full analysis belongs in the separate private runtime log.
+- Incident selection and dimension dialogs are covered by browser checks when UI behavior changes.
 - No real data, endpoint credentials, tokens or generated private reports are added to Git.
 - README/help and task status reflect the behavior.
 

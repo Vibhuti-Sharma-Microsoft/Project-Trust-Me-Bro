@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from sre_assurance.executor import evaluate_case
-from sre_assurance.imports import write_json
+from scoring_service.executor import evaluate_case
+from scoring_service.imports import write_json
 
 
 def test_replay_batch_expected_outcomes(corpus, tmp_path):
@@ -22,7 +22,7 @@ def test_replay_batch_expected_outcomes(corpus, tmp_path):
 
 def test_gate_failure_and_missing_todo_never_fetch_docs_or_judge_steps(corpus, tmp_path):
     root, manifest, config = corpus
-    with patch("sre_assurance.executor.DocumentStore") as docs:
+    with patch("scoring_service.executor.DocumentStore") as docs:
         for case in manifest.cases[3:5]:
             result = evaluate_case(case, root, config, tmp_path / "cache")
             assert not result.steps

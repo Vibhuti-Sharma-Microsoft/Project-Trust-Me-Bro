@@ -33,11 +33,11 @@ def check_publish(root: Path) -> list[str]:
     for name in sorted(tracked | untracked):
         path = PurePosixPath(name)
         private = (
-            path.parts[0] in PRIVATE_ROOTS
+            path.parts[0] in PRIVATE_ROOTS or path.parts[0].startswith(".venv")
             or path.suffix.lower() in PRIVATE_SUFFIXES
             or (path.name.startswith(".env") and path.name != ".env.example")
             or (path.parts[0] == "config" and path.name.endswith(".local.json"))
-            or (len(path.parts) == 1 and path.suffix.lower() in {".csv", ".jsonl"})
+            or (len(path.parts) == 1 and path.suffix.lower() in {".csv", ".jsonl", ".log"})
         )
         if private:
             findings.append(f"Private/generated path is publishable: {name}")

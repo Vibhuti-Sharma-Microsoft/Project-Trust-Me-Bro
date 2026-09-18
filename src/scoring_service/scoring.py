@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from statistics import median
 
 from .config import EvaluationConfig, TrustRule
@@ -7,6 +9,111 @@ from .models import ClaimSupport, DocumentEvidence, EvidenceItem, EvidenceRef, G
 from .time_utils import timestamp_ns
 
 ROLES = ("gpt", "claude", "gemini")
+_JSON_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _partial_json_string(value: str) -> str | None:
+    if not value.startswith('"'):
+        return None
+    result: list[str] = []
+    index = 1
+    escapes = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+    while index < len(value):
+        char = value[index]
+        if char != "\\":
+            result.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(value):
+            break
+        escaped = value[index + 1]
+        if escaped in escapes:
+            result.append(escapes[escaped])
+            index += 2
+        elif escaped == "u" and index + 5 < len(value):
+            digits = value[index + 2:index + 6]
+            try:
+                result.append(chr(int(digits, 16)))
+            except ValueError:
+                break
+            index += 6
+        else:
+            break
+    return "".join(result)
+
+
+def reference_texts(
+    content: str,
+    quality_flags: list[str] | None = None,
+    query: str = "",
+) -> tuple[str, ...]:
+    """Return raw evidence plus exact string values from a JSON-encoded payload."""
+    texts = [content]
+    pending = [(content, 0)]
+    while pending:
+        encoded, depth = pending.pop()
+        for token in _JSON_STRING.findall(encoded):
+            try:
+                decoded = json.loads(token)
+            except (ValueError, RecursionError):
+                continue
+            if decoded not in texts:
+                texts.append(decoded)
+        try:
+            value = json.loads(encoded)
+        except (ValueError, RecursionError):
+            if depth < 2 and encoded.startswith('"'):
+                try:
+                    decoded = json.loads(encoded + '"')
+                except (ValueError, RecursionError):
+                    decoded = _partial_json_string(encoded)
+                if decoded is not None:
+                    if decoded not in texts:
+                        texts.append(decoded)
+                    pending.append((decoded, depth + 1))
+            continue
+        stack = [value]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, str):
+                if current not in texts:
+                    texts.append(current)
+                if depth < 2 and current.lstrip().startswith(("{", "[", '"')):
+                    pending.append((current, depth + 1))
+            elif isinstance(current, dict):
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+    if quality_flags:
+        texts.append(json.dumps({"quality_flags": quality_flags}))
+    if query:
+        texts.append(query)
+    for text in tuple(texts):
+        unescaped = _partial_json_string('"' + text)
+        if unescaped and unescaped != text and unescaped not in texts:
+            texts.append(unescaped)
+        escaped = json.dumps(text, ensure_ascii=False)[1:-1]
+        if escaped not in texts:
+            texts.append(escaped)
+        control_escaped = (
+            text.replace("\\", "\\\\")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+        if control_escaped not in texts:
+            texts.append(control_escaped)
+    return tuple(texts)
+
+
+def invalid_reference_quote(quote: str) -> bool:
+    lowered = quote.strip().lower()
+    return (
+        not lowered
+        or "<redacted" in lowered
+        or "\\u003credacted" in lowered
+        or lowered in {"...", "…", "null"}
+    )
 
 
 def gate_decision(votes: dict[str, GateVote]) -> str:
@@ -26,10 +133,12 @@ def validate_references(references: list[EvidenceRef], evidence: list[EvidenceIt
         item = allowed.get(ref.evidence_id)
         if item is None or not item.eligible:
             raise ValueError(f"Judge cited ineligible or unknown evidence: {ref.evidence_id}")
-        if ref.quote not in item.content:
+        if not any(
+            ref.quote in text
+            for text in reference_texts(item.content, item.quality_flags, item.query)
+        ):
             raise ValueError(f"Judge quote is absent from evidence: {ref.evidence_id}")
-        lowered = ref.quote.strip().lower()
-        if "<redacted" in lowered or "\\u003credacted" in lowered or lowered in {"...", "…", "null"}:
+        if invalid_reference_quote(ref.quote):
             raise ValueError("A redaction/placeholder is not a valid evidence quotation")
 
 

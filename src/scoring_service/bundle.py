@@ -158,15 +158,33 @@ def _todo_from_call(call: ToolCall) -> TodoPlan | None:
         title = item.get("title", item.get("description"))
         if not isinstance(title, str) or not title.strip():
             return None
+        description = item.get("description", "")
+        if not isinstance(description, str):
+            return None
         if str(item.get("status", "")).lower() in {"completed", "complete", "done"}:
             return None
         kind: Literal["evidence", "housekeeping", "conditional"] = "evidence"
         if re.match(r"(?i)^(wait|post|publish|update (?:the )?(?:todo|task))\b", title):
             kind = "housekeeping"
-        elif re.match(r"(?i)^(if|when|for each)\b", title):
+        elif any(
+            re.search(r"(?i)\b(if|when|for (?:each|every))\b", text)
+            for text in (title, description)
+            if text
+        ):
             kind = "conditional"
-        steps.append(TodoStep(id=f"step-{item.get('id', index + 1)}", title=title, kind=kind,
-                              condition=title if kind == "conditional" else ""))
+        steps.append(TodoStep(
+            id=f"step-{item.get('id', index + 1)}",
+            title=title,
+            description=description if description != title else "",
+            kind=kind,
+            condition=next(
+                (
+                    text for text in (description, title)
+                    if re.search(r"(?i)\b(if|when|for (?:each|every))\b", text)
+                ),
+                "",
+            ) if kind == "conditional" else "",
+        ))
     if len({step.id for step in steps}) != len(steps):
         return None
     return TodoPlan(source_call_id=call.id, created_at=call.started_at, steps=steps, raw=call.input_raw)

@@ -20,12 +20,12 @@ def digest(value: Any) -> str:
 
 class ModelEndpoint(Contract):
     model: str
-    endpoint_env: str
-    auth_env: str
+    endpoint_env: str = ""
+    auth_env: str = ""
     auth_header: Literal["Authorization", "api-key"] = "Authorization"
     protocol: Literal["openai_chat", "openai_responses"] = "openai_chat"
     approved_for_incident_data: bool = False
-    allowed_host: str
+    allowed_host: str = ""
 
 
 class TrustRule(Contract):

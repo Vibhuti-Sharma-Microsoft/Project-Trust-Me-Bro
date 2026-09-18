@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from sre_assurance.config import load_config
-from sre_assurance.demo import create_demo
-from sre_assurance.imports import load_manifest
+from scoring_service.config import load_config
+from scoring_service.demo import create_demo
+from scoring_service.imports import load_manifest
 
 
 @pytest.fixture
